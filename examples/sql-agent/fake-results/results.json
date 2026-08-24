@@ -1,0 +1,35 @@
+{
+  "schema_version": "v1",
+  "cases": [
+    {
+      "case_id": "customer-count",
+      "status": "completed",
+      "candidate_sql": "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country",
+      "trajectory": [
+        {
+          "timestamp": "2026-08-24T00:00:00Z",
+          "type": "assistant_message",
+          "payload": {
+            "content": "I will count customers by country."
+          }
+        },
+        {
+          "timestamp": "2026-08-24T00:00:01Z",
+          "type": "tool_call",
+          "payload": {
+            "tool": "sql-readonly"
+          }
+        }
+      ],
+      "agent_execution": {
+        "status": "ok",
+        "result": "query proposed"
+      },
+      "usage": {
+        "input_tokens": 128,
+        "output_tokens": 36,
+        "cost_usd": 0.0012
+      }
+    }
+  ]
+}

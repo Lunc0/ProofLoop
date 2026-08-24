@@ -1,0 +1,39 @@
+schema_version: v1
+experiment: sales-sql-skill
+
+environment:
+  model:
+    provider: deepseek
+    name: deepseek-v4
+    params:
+      temperature: 0
+  dsh:
+    version: 0.1.0-rc.6
+    profile: sql-eval
+    runner: fake
+    fake_output: fake-results/results.json
+  tools:
+    - id: sql-readonly
+      version: 1.0.0
+      manifest: tools/sql-readonly.json
+  database:
+    kind: postgresql
+    image: postgres:16.6
+    image_digest: sha256:557fea37a744d5f4c8faab304b0a90858b53ab119735a88c131fd19dab802f36
+    schema: fixtures/schema.sql
+    seed: fixtures/seed.sql
+  evaluator:
+    version: sql-result-v1
+    result_order: ignore
+    numeric_tolerance: 0
+    max_rows: 1000
+    timeout_ms: 5000
+
+cases:
+  - id: customer-count
+    slice: fast
+    prompt: 每个国家有多少客户？
+    expected_query: |
+      SELECT country, COUNT(*) AS customer_count
+      FROM customers
+      GROUP BY country

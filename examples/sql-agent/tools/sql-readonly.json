@@ -1,0 +1,5 @@
+{
+  "id": "sql-readonly",
+  "version": "1.0.0",
+  "mode": "read-only"
+}

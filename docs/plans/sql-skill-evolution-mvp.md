@@ -1,0 +1,145 @@
+# Implementation Plan: DSH SQL Skill Evolution CLI（v0.1）
+
+> **Superseded:** implementation is paused pending review of the reduced Python v0.1 design in [`docs/design/v0.1-workflow-shell.md`](../design/v0.1-workflow-shell.md). This plan describes later evolution/governance scope, contains obsolete TypeScript assumptions, and must not be used to start the workflow-shell implementation.
+
+## Overview
+
+实现一个 TypeScript CLI，独立管理实验、可重复执行的 SQL 评估、证据与晋级治理；通过 DSH 的命令行和 append-only session log 集成 DSH。该边界让 DSH / plugins 的快速演进不影响本项目的持久化数据模型，也便于将来替换为 skill-up 或其他 harness adapter。
+
+## Reuse assessment
+
+| Source | Reuse decision | Reason |
+|---|---|---|
+| DeepSeek Harness | **Direct runtime dependency, but through version-pinned CLI contract** | DSH 已具备 plugin composition、profile patch、headless mode 和 append-only session logs；它能记录模型可见输入、tool calls 与 tool results，是 trajectory 的权威来源。 |
+| `skill-up` | **Borrow design; optional adapter later** | 可借鉴 YAML suite、`SessionInput` / `SessionResult`、显式 artifacts、rule/script judge、CI report 的边界。它没有内置 DSH engine，且无法直接覆盖 environment fingerprint、SQL evidence、failure attribution、champion registry。 |
+| `dsh-eval` community plugin | **Inspect and borrow test ideas only, not a v0.1 dependency** | 它已有 headless benchmark、trace/metrics、script checks 与 run comparison，但仍是社区项目，目标官方 `0.1.0-rc.6`，并明确未实现并行和 dashboard。先避免把核心数据模型绑定到它。 |
+
+本项目不复制任何 `skill-up` 或 DSH 源码。若后续引入 Apache-2.0 的 `skill-up` 源文件，必须保留其许可证和 NOTICE；若复制 MIT 的 DSH / dsh-eval 源文件，必须保留相应许可证。
+
+## Architecture decisions
+
+- **TypeScript rather than Go / Python：**DSH 是 TypeScript plugin ecosystem。外部 CLI adapter 可使用稳定的进程 + JSONL 交互，未来需要对 session events 做原生订阅时也无需重写语言。
+- **Adapter boundary：**`DshRunner` 接收冻结的 `RunInput`，调用可配置的 argv，读取已声明的 session-log / artifact 路径，产出内部 `Trajectory`。`FakeRunner` 以同一接口支撑稳定测试。
+- **Evaluator owns SQL execution：**不要让模型自身的“我执行成功了”成为证据。模型生成的 SQL 与 golden query 在同一只读 fixture 上由 evaluator 独立执行和比较。
+- **SQLite registry + filesystem artifacts：**SQLite 保存索引、状态转换和 champion；大件 trace / report 放在 `runs/<run-id>/`。数据库不可用时仍可根据 run 目录审计。
+- **No automatic evolution：**第一版只生成有结构的 attribution 和 regression candidate；Skill 修改由人或上层 agent 完成，避免错误 evaluator 推动错误优化。
+
+## Task list
+
+### Phase 1: Foundation
+
+#### Task 1: Bootstrap CLI and project rules
+
+**Acceptance criteria:** strict TypeScript project has `validate`, `run`, `gate`, `promote`, `rollback` command shells; lint/test/build run locally; `AGENTS.md` records commands and safety boundaries.
+
+**Verify:** `npm run build`, `npm test`, `npm run lint`.
+
+**Files:** `package.json`, `tsconfig.json`, `src/cli.ts`, `AGENTS.md`, test configuration.
+**Estimated scope:** Small, 0.5–1 engineer-day.
+
+#### Task 2: Manifest schema and reproducible environment fingerprints
+
+**Acceptance criteria:** malformed config fails clearly; exact declared files and canonical configuration produce a repeatable fingerprint; secrets cannot enter persisted output.
+
+**Verify:** unit tests for stable hashes, file changes and redaction.
+
+**Files:** `src/config/*`, `src/fingerprint/*`, `tests/unit/*`.
+**Estimated scope:** Medium, 1–1.5 engineer-days.
+
+### Checkpoint: Foundation
+
+- [ ] Same manifest twice produces same fingerprint.
+- [ ] Changing model / profile patch / fixture / evaluator changes it.
+- [ ] No network call or API credit use occurs.
+
+### Phase 2: Evidence-producing execution
+
+#### Task 3: DSH process adapter and fake runner
+
+**Acceptance criteria:** configurable argv runs a fake DSH process; JSONL / session artifacts are captured verbatim; trajectory extracts SQL, tool calls, durations and available usage without fabricating data.
+
+**Verify:** integration tests for success, non-zero exit, malformed log and missing cost.
+
+**Files:** `src/runner/*`, `tests/integration/*`, `examples/fake-dsh/*`.
+**Estimated scope:** Large, 2–4 engineer-days. **Risk:** real DSH headless log / CLI contract must be confirmed against the pinned version.
+
+#### Task 4: Safe SQLite fixture executor and objective comparator
+
+**Acceptance criteria:** only one read-only query executes; fixture is immutable; gold/candidate results normalise and compare; time/row limits emit deterministic outcomes.
+
+**Verify:** unit + integration coverage for success, syntax error, write attempt, wrong result and ordering differences.
+
+**Files:** `src/sql/*`, `src/evaluator/*`, `tests/*`, sample fixture.
+**Estimated scope:** Large, 2–3 engineer-days.
+
+#### Task 5: Run registry and reports
+
+**Acceptance criteria:** a run is queryable by ID; records reference immutable artifacts; JSON and concise Markdown reports include environment fingerprint, evidence, verdict and costs / unknown values.
+
+**Verify:** end-to-end fake runner fixture checks the report schema and SQLite rows.
+
+**Files:** `src/registry/*`, `src/reporting/*`, `tests/integration/*`.
+**Estimated scope:** Medium, 1–1.5 engineer-days.
+
+### Checkpoint: End-to-end evidence
+
+- [ ] One fast suite produces a self-contained auditable run directory.
+- [ ] All five core outcome types are demonstrably distinct.
+- [ ] Corrupt / drifting environment invalidates the run rather than failing the Skill.
+
+### Phase 3: Governance and CI
+
+#### Task 6: Failure attribution
+
+**Acceptance criteria:** ordered rules output Skill, harness/tool or eval/data attribution with evidence and confidence; unknown remains unknown.
+
+**Verify:** table-driven unit tests for precedence and ambiguous cases.
+
+**Files:** `src/attribution/*`, `tests/unit/attribution.test.ts`.
+**Estimated scope:** Medium, 1–1.5 engineer-days.
+
+#### Task 7: Gates, champion promotion and rollback
+
+**Acceptance criteria:** fast / dev / held-out promotion state machine enforces order; champion changes are append-only; rollback records a reason and target champion.
+
+**Verify:** state-transition unit tests and e2e candidate flow.
+
+**Files:** `src/gates/*`, `src/registry/*`, `tests/*`.
+**Estimated scope:** Medium, 1.5–2 engineer-days.
+
+#### Task 8: CI and runnable documentation
+
+**Acceptance criteria:** pull requests run lint/test/validate/fast fake suite and publish reports; docs explain real-DSH provisioning separately from PR CI.
+
+**Verify:** inspect workflow, run equivalent commands locally.
+
+**Files:** `.github/workflows/ci.yml`, `README.md`, `examples/sql-agent/*`.
+**Estimated scope:** Small, 0.5–1 engineer-day.
+
+### Checkpoint: v0.1 release candidate
+
+- [ ] All tests, lint and build pass.
+- [ ] CI gate is green with the fake DSH runner.
+- [ ] Example shows candidate → fast → dev → held-out → promote, plus rollback.
+- [ ] A human has reviewed SQL safety policy and the PostgreSQL-vs-SQLite decision.
+
+## Estimate
+
+| Delivery shape | Engineering effort | Calendar expectation |
+|---|---:|---:|
+| Core only: Tasks 1–5 | 6.5–11 days | about 1–2 weeks |
+| Full v0.1: Tasks 1–8 | 10–16 days | about 2–3 weeks |
+| Add PostgreSQL Docker fixture in v0.1 | +2–4 days | add 0.5–1 week |
+| Native DSH plugin event subscriber | +3–6 days | after DSH APIs are pinned |
+
+The uncertainty is almost entirely the real DSH headless/session-log integration and the target SQL dialect, not the CLI / evaluation mechanics. Building on external processes first contains that risk and leaves a clean route to a native DSH plugin later.
+
+## Risks and mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| DSH is developer preview and may break interfaces | High | Pin version and profile artifact; configure argv / log paths; test with fake runner; no internal imports in v0.1. |
+| SQLite differs from target production dialect | High | Treat it as a deterministic starter fixture only; add a target-dialect adapter before treating results as production quality. |
+| SQL result equivalence has semantic edge cases | Medium | Start with exact schema/value comparison plus documented normalisation; version every semantic change in the evaluator. |
+| Agent can issue harmful SQL | High | Dedicated read-only database credential, statement parser/guard, isolated fixture, timeout and row cap. |
+| Held-out leakage optimises the benchmark | High | Separate location/access, no prompt-visible expected answers, require evaluator/data change review. |
