@@ -6,7 +6,7 @@
 |---|---|---|
 | `examples/sql-agent/experiment.dsh.yaml` | 是 | 定义可比较的实验：模型标识、DSH profile、fixture、题集和 evaluator。 |
 | `examples/sql-agent/.env.example` | 是 | 本机配置模板；不含任何秘密。 |
-| `examples/sql-agent/.env` | 否 | 每台电脑自己的凭据、DSH 主目录和 executable 路径。 |
+| `examples/sql-agent/.env` | 否 | 每台电脑的非敏感 DSH executable / session-log 路径覆盖。 |
 
 `experiment.dsh.yaml` 说明“评测什么”；`.env` 说明“这台电脑如何连接并启动 DSH”。不要将 API Key、
 token、密码、连接串或生产数据库信息放入 manifest。
@@ -15,17 +15,17 @@ token、密码、连接串或生产数据库信息放入 manifest。
 
 | 变量 | 读取者 | 是否进入 run artifact |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | DSH | 否 |
-| `DSH_HOME` | DSH | 否 |
 | `SKILL_EVOLVE_DSH_BINARY` | skill-evolve | 是，作为非敏感 resolved DSH binary |
+| `SKILL_EVOLVE_DSH_SESSION_LOG_ROOT` | skill-evolve | 是，作为非敏感 resolved DSH session-log root |
 
-`SKILL_EVOLVE_DSH_BINARY` 的优先级是：进程环境变量 > manifest workspace 中的 `.env` >
-`experiment.dsh.yaml` 的 `dsh.binary`。它用于处理 DSH 未加入 PATH 的电脑。
+这两个 `SKILL_EVOLVE_*` 覆盖项的优先级都是：进程环境变量 > manifest workspace 中的
+`.env` > manifest 值（session-log root 未声明时默认 `%USERPROFILE%\\.dsh\\sessions`）。
 
-Python 不会加载或复制 `.env` 中的凭据；DSH 在 manifest workspace 中启动，自行按其 credential
-provider 读取 `DEEPSEEK_API_KEY`、`DSH_HOME` 等变量。`dsh.profile`、模型标识、DSH version、
-permission mode、可用 tool、PostgreSQL image digest、SQL policy 和 cases 仍必须固定在 manifest，
-不能由 `.env` 覆盖。
+Python 不会加载或复制 `.env` 中的凭据。真实 DSH case 在 run 专属 task workspace 中启动，避免
+Agent 读取 manifest 的 expected query、seed 或 fake result；因此应将 provider credential 配置在
+DSH credential store（推荐）或由操作者预先设置在进程环境中，而不要放入 manifest workspace 的
+`.env`。`dsh.profile`、模型标识、DSH version、permission mode、可用 tool、PostgreSQL image digest、
+SQL policy 和 cases 仍必须固定在 manifest，不能由 `.env` 覆盖。
 
 ## 新机器运行
 

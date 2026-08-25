@@ -110,6 +110,12 @@ class PostgresFixture:
         except psycopg.Error as error:
             return QueryExecution(error=_database_error_message(error))
 
+    @property
+    def container_name(self) -> str:
+        """Expose the disposable container identity without exposing any credential."""
+
+        return self._container_name
+
     def _start_container(self) -> None:
         image = f"{self._database.image}@{self._database.image_digest}"
         command = [

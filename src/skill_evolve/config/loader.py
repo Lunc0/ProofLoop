@@ -32,6 +32,7 @@ class ResolvedManifest:
     schema_file: Path
     seed_file: Path
     tool_manifests: tuple[tuple[str, Path], ...]
+    case_context_files: tuple[tuple[str, tuple[Path, ...]], ...]
 
     def select_cases(self, requested_slice: str | None) -> tuple[CaseConfig, ...]:
         if requested_slice is None:
@@ -40,6 +41,12 @@ class ResolvedManifest:
         if not selected:
             raise ManifestError(f"suite {requested_slice!r} contains no cases")
         return selected
+
+    def context_files_for(self, case_id: str) -> tuple[Path, ...]:
+        for configured_case_id, paths in self.case_context_files:
+            if configured_case_id == case_id:
+                return paths
+        raise ManifestError(f"case {case_id!r} has no resolved context files")
 
 
 def load_manifest(path: Path) -> ResolvedManifest:
@@ -83,6 +90,16 @@ def load_manifest(path: Path) -> ResolvedManifest:
         (tool.id, _resolve_required(workspace, tool.manifest, f"tools[{tool.id}].manifest"))
         for tool in manifest.environment.tools
     )
+    case_context_files = tuple(
+        (
+            case.id,
+            tuple(
+                _resolve_required(workspace, path, f"cases[{case.id}].context_files")
+                for path in case.context_files
+            ),
+        )
+        for case in manifest.cases
+    )
     return ResolvedManifest(
         path=manifest_path,
         workspace=workspace,
@@ -93,6 +110,7 @@ def load_manifest(path: Path) -> ResolvedManifest:
         schema_file=schema_file,
         seed_file=seed_file,
         tool_manifests=tool_manifests,
+        case_context_files=case_context_files,
     )
 
 

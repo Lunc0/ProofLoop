@@ -64,6 +64,11 @@ class RunDirectory:
         ordered_inputs.extend(
             (f"tool-{tool_id}", path) for tool_id, path in resolved.tool_manifests
         )
+        ordered_inputs.extend(
+            (f"case-{case_id}-context-{index}", path)
+            for case_id, paths in resolved.case_context_files
+            for index, path in enumerate(paths, start=1)
+        )
         for index, (label, source) in enumerate(ordered_inputs, start=1):
             destination = inputs / f"{index:02d}-{label}-{source.name}"
             shutil.copyfile(source, destination)
@@ -131,3 +136,9 @@ def _replace_manifest_paths(
         if tool["id"] != tool_id:
             raise ValueError("tool manifest ordering changed during resolution")
         tool["manifest"] = replacements[source]
+    for case, (case_id, sources) in zip(
+        data["cases"], resolved.case_context_files, strict=True
+    ):
+        if case["id"] != case_id:
+            raise ValueError("case context ordering changed during resolution")
+        case["context_files"] = [replacements[source] for source in sources]

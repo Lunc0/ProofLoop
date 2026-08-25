@@ -5,13 +5,16 @@
 ## v0.1 scope
 
 - Manifest validation and SHA-256 environment fingerprints.
-- Fake runner evidence capture: trajectory, candidate SQL, execution metadata and provider-reported cost.
+- Fake runner and real DSH evidence capture: redacted append-only session log, trajectory, candidate SQL,
+  execution metadata and provider-reported usage.
 - Disposable, read-only PostgreSQL fixture through Docker.
 - Execution correctness, result equivalence and `fast` / `dev` / `held_out` slices.
 - Conservative `skill` versus `eval_data` attribution, with regression drafts or repair checklists.
 - Self-contained run artifacts and `rerun` from copied inputs.
 
-真实 DSH runner 已支持 headless profile；并发调度、自动 Skill 修改与 champion promotion 仍明确延后。
+真实 DSH runner 使用固定 headless profile 和 session-log root；每个 case 只看到专属 task
+workspace、schema、明确声明的 context 和无凭据的本地只读查询 capability。并发调度、自动 Skill
+修改与 champion promotion 仍明确延后。
 
 ## Prerequisites
 

@@ -20,20 +20,24 @@ from skill_evolve.runner.contracts import (
     RunnerOutput,
     TrajectoryEvent,
 )
+from skill_evolve.runner.dsh_session import (
+    DshSessionLogError,
+    find_new_session_log,
+    load_session_log,
+    normalise_session_log,
+    snapshot_session_logs,
+)
+from skill_evolve.runner.redaction import redact_text
 
 _SQL_BLOCK_PATTERN = re.compile(r"```(?:sql|postgresql)\s*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
-_ASSIGNMENT_SECRET_PATTERN = re.compile(
-    r"(?im)(\b(?:api[_-]?key|password|secret|token|authorization)\b\s*[:=]\s*)([^\s'\"]+)"
-)
-_BEARER_SECRET_PATTERN = re.compile(r"(?i)(\bbearer\s+)([^\s'\"]+)")
-_KEY_PREFIX_SECRET_PATTERN = re.compile(r"\b(?:sk|ds)-[A-Za-z0-9_-]{12,}\b")
 
 
 class DshRunner:
     """Run each requested case in a fresh, non-interactive DSH session.
 
-    DSH prints its final answer to stdout. This adapter deliberately relies only on
-    that public CLI boundary until a local session-log schema is captured and pinned.
+    DSH prints its final answer to stdout. When configured with a session-log root,
+    this adapter uses the observed, version-pinned append-only session log as the
+    authoritative trajectory evidence.
     """
 
     def __init__(self, config: DshConfig, profile_patch: Path | None) -> None:
@@ -45,7 +49,7 @@ class DshRunner:
         raw_artifacts: list[RawArtifact] = []
         stderr_parts: list[str] = []
         for case in input.cases:
-            output, artifacts, stderr = self._run_case(case, input.workspace)
+            output, artifacts, stderr = self._run_case(case, input)
             case_outputs.append(output)
             raw_artifacts.extend(artifacts)
             if stderr:
@@ -60,10 +64,27 @@ class DshRunner:
         )
 
     def _run_case(
-        self, case: CaseConfig, workspace: Path
+        self, case: CaseConfig, input: RunInput
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
-        command = self._command_for(case)
+        command = self._command_for(case, input.database_access is not None)
         started_at = _utc_timestamp()
+        try:
+            workspace = _prepare_task_workspace(case, input)
+        except OSError as error:
+            return self._failed_case(
+                case,
+                command,
+                started_at,
+                "",
+                str(error),
+                f"could not prepare DSH task workspace: {error.__class__.__name__}",
+            )
+        session_before = None
+        if self._config.session_log_root is not None:
+            try:
+                session_before = snapshot_session_logs(Path(self._config.session_log_root))
+            except DshSessionLogError as error:
+                return self._failed_case(case, command, started_at, "", "", str(error))
         try:
             completed = subprocess.run(
                 command,
@@ -97,8 +118,8 @@ class DshRunner:
                 f"could not start DSH: {error.__class__.__name__}",
             )
 
-        stdout = _redact(completed.stdout)
-        stderr = _redact(completed.stderr)
+        stdout = redact_text(completed.stdout)
+        stderr = redact_text(completed.stderr)
         artifacts = _case_artifacts(case.id, command, stdout, stderr, self._config.timeout_ms)
         if completed.returncode != 0:
             return (
@@ -107,6 +128,62 @@ class DshRunner:
                     started_at,
                     stdout,
                     f"DSH exited with code {completed.returncode}",
+                ),
+                artifacts,
+                stderr,
+            )
+
+        if session_before is not None:
+            try:
+                session_path = find_new_session_log(
+                    session_before, Path(self._config.session_log_root or "")
+                )
+                session_log = load_session_log(session_path)
+                artifacts = (
+                    *artifacts,
+                    RawArtifact(
+                        relative_path=f"dsh/{case.id}.session.jsonl",
+                        content=session_log.redacted_jsonl,
+                    ),
+                )
+                evidence = normalise_session_log(session_log)
+            except DshSessionLogError as error:
+                return _runner_error_output(case, started_at, stdout, str(error)), artifacts, stderr
+            candidate_sql, extraction_error = _extract_candidate_sql(evidence.final_message)
+            if extraction_error is not None:
+                return (
+                    _runner_error_output(
+                        case, started_at, evidence.final_message, extraction_error
+                    ),
+                    artifacts,
+                    stderr,
+                )
+            trajectory = (
+                TrajectoryEvent(
+                    timestamp=started_at,
+                    type="dsh_invocation",
+                    payload={"argv": command[:-1], "timeout_ms": self._config.timeout_ms},
+                ),
+                *evidence.trajectory,
+            )
+            if evidence.unknown_event_types:
+                trajectory = (
+                    *trajectory,
+                    TrajectoryEvent(
+                        timestamp=_utc_timestamp(),
+                        type="dsh_unknown_event_types",
+                        payload={"types": list(evidence.unknown_event_types)},
+                    ),
+                )
+            return (
+                RunnerCaseOutput(
+                    case_id=case.id,
+                    status="completed",
+                    final_message=evidence.final_message,
+                    candidate_sql=candidate_sql,
+                    trajectory=trajectory,
+                    agent_execution=AgentExecution(status="ok", result=evidence.final_message),
+                    usage=evidence.usage,
                 ),
                 artifacts,
                 stderr,
@@ -152,8 +229,8 @@ class DshRunner:
         stderr: str,
         reason: str,
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
-        redacted_stdout = _redact(stdout)
-        redacted_stderr = _redact(stderr)
+        redacted_stdout = redact_text(stdout)
+        redacted_stderr = redact_text(stderr)
         return (
             _runner_error_output(case, timestamp, redacted_stdout, reason),
             _case_artifacts(
@@ -162,23 +239,79 @@ class DshRunner:
             redacted_stderr,
         )
 
-    def _command_for(self, case: CaseConfig) -> list[str]:
+    def _command_for(self, case: CaseConfig, has_database_access: bool = False) -> list[str]:
         command = [*_dsh_command_prefix(self._config.binary), "--profile", self._config.profile]
         if self._profile_patch is not None:
             command.extend(("--patch", str(self._profile_patch)))
         command.extend(self._config.runner_args)
-        command.append(_build_job(case))
+        command.append(_build_job(case, has_database_access))
         return command
 
 
-def _build_job(case: CaseConfig) -> str:
+def _build_job(case: CaseConfig, has_database_access: bool) -> str:
+    database_instruction = ""
+    if has_database_access:
+        database_instruction = (
+            "当前目录的 schema.sql 可供查看。如需探索数据，只能通过 "
+            "`.\\sql-readonly.ps1 -Query '<SQL>'` 执行只读查询。"
+        )
     return (
         f"{case.prompt}\n\n"
         "你正在接受独立 PostgreSQL evaluator 的评估。"
+        f"{database_instruction}"
         "只提出一个候选 PostgreSQL 查询，不要执行写操作。"
         "将该查询放入唯一一个标记为 sql 的 Markdown fenced code block 中。"
         "不要输出其他 SQL code block。"
     )
+
+
+def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
+    """Materialise only task-visible, non-secret inputs for one DSH session."""
+
+    if input.agent_workspace_root is None:
+        return input.workspace
+    workspace = input.agent_workspace_root / case.id
+    workspace.mkdir(parents=True, exist_ok=False)
+    if input.schema_file is not None:
+        shutil.copyfile(input.schema_file, workspace / "schema.sql")
+    if input.candidate_file is not None:
+        candidate_directory = workspace / "candidate"
+        candidate_directory.mkdir()
+        shutil.copyfile(input.candidate_file, candidate_directory / input.candidate_file.name)
+    context_files = input.context_files_for(case.id)
+    if context_files:
+        context_directory = workspace / "context"
+        context_directory.mkdir()
+        for index, source in enumerate(context_files, start=1):
+            shutil.copyfile(source, context_directory / f"{index:02d}-{source.name}")
+    (workspace / "TASK.md").write_text(
+        "# SQL evaluation task\n\n"
+        "Use the supplied prompt. `schema.sql` and `context/` contain the only task context. "
+        "The expected query and evaluator inputs are intentionally not present.\n",
+        encoding="utf-8",
+    )
+    if input.database_access is not None:
+        _write_read_only_query_tool(workspace, input.database_access.query_endpoint)
+    return workspace
+
+
+def _write_read_only_query_tool(workspace: Path, query_endpoint: str) -> None:
+    """Create a capability-limited discovery tool for the disposable fixture only."""
+
+    script = f"""[CmdletBinding()]
+param(
+  [Parameter(Mandatory = $true)]
+  [ValidateNotNullOrEmpty()]
+  [string]$Query
+)
+
+$ErrorActionPreference = 'Stop'
+$request = @{{ query = $Query }} | ConvertTo-Json -Compress
+$response = Invoke-RestMethod -Uri '{query_endpoint}' -Method Post `
+  -ContentType 'application/json' -Body $request
+$response | ConvertTo-Json -Depth 16
+"""
+    (workspace / "sql-readonly.ps1").write_text(script, encoding="utf-8")
 
 
 def _dsh_command_prefix(binary: str) -> list[str]:
@@ -257,12 +390,6 @@ def _extract_candidate_sql(stdout: str) -> tuple[str | None, str | None]:
     if len(blocks) > 1:
         return None, "DSH final answer contains multiple SQL code blocks"
     return (blocks[0], None) if blocks else (None, None)
-
-
-def _redact(value: str) -> str:
-    value = _ASSIGNMENT_SECRET_PATTERN.sub(r"\1<redacted>", value)
-    value = _BEARER_SECRET_PATTERN.sub(r"\1<redacted>", value)
-    return _KEY_PREFIX_SECRET_PATTERN.sub("<redacted>", value)
 
 
 def _as_text(value: str | bytes | None) -> str:

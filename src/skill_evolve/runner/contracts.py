@@ -53,12 +53,30 @@ class RunnerOutput(StrictRunnerModel):
 
 
 @dataclass(frozen=True)
+class ReadOnlyDatabaseAccess:
+    """Non-secret capability for DSH to inspect a disposable exploration database."""
+
+    query_endpoint: str
+
+
+@dataclass(frozen=True)
 class RunInput:
     run_id: str
     workspace: Path
     environment_fingerprint: str
     candidate_ref: str | None
     cases: tuple[CaseConfig, ...]
+    schema_file: Path | None = None
+    candidate_file: Path | None = None
+    case_context_files: tuple[tuple[str, tuple[Path, ...]], ...] = ()
+    agent_workspace_root: Path | None = None
+    database_access: ReadOnlyDatabaseAccess | None = None
+
+    def context_files_for(self, case_id: str) -> tuple[Path, ...]:
+        for configured_case_id, paths in self.case_context_files:
+            if configured_case_id == case_id:
+                return paths
+        return ()
 
 
 @dataclass(frozen=True)

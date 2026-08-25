@@ -9,6 +9,7 @@ from pathlib import Path
 from skill_evolve.config.models import DshConfig
 
 DSH_BINARY_ENV = "SKILL_EVOLVE_DSH_BINARY"
+DSH_SESSION_LOG_ROOT_ENV = "SKILL_EVOLVE_DSH_SESSION_LOG_ROOT"
 
 
 def resolve_dsh_config(
@@ -18,16 +19,24 @@ def resolve_dsh_config(
 ) -> DshConfig:
     """Resolve the non-secret DSH executable override for one manifest workspace.
 
-    Only ``SKILL_EVOLVE_DSH_BINARY`` is read from ``.env``. Provider credentials,
-    ``DSH_HOME``, and all other DSH variables remain exclusively DSH's responsibility
-    and can never be copied into the experiment manifest or run artifacts.
+    Only the executable and session-log-root overrides are read from ``.env``.
+    Provider credentials, ``DSH_HOME``, and all other DSH variables remain exclusively
+    DSH's responsibility and can never be copied into the experiment manifest or run
+    artifacts.
     """
 
     environment = os.environ if environ is None else environ
     binary = environment.get(DSH_BINARY_ENV) or _read_dotenv_value(workspace, DSH_BINARY_ENV)
-    if binary is None:
-        return config
-    return DshConfig.model_validate(config.model_dump(mode="python") | {"binary": binary})
+    session_log_root = (
+        environment.get(DSH_SESSION_LOG_ROOT_ENV)
+        or _read_dotenv_value(workspace, DSH_SESSION_LOG_ROOT_ENV)
+        or config.session_log_root
+        or str(Path.home() / ".dsh" / "sessions")
+    )
+    updates: dict[str, str] = {"session_log_root": session_log_root}
+    if binary is not None:
+        updates["binary"] = binary
+    return DshConfig.model_validate(config.model_dump(mode="python") | updates)
 
 
 def _read_dotenv_value(workspace: Path, key: str) -> str | None:

@@ -70,6 +70,17 @@ def test_process_dsh_binary_override_takes_precedence_over_workspace_dotenv(
     assert resolved.manifest.environment.dsh.binary == "from-process"
 
 
+def test_dsh_session_log_root_resolves_from_non_secret_dotenv(tmp_path) -> None:
+    manifest_path = write_experiment(tmp_path)
+    (tmp_path / ".env").write_text(
+        "SKILL_EVOLVE_DSH_SESSION_LOG_ROOT=C:/Users/test/.dsh/sessions\n", encoding="utf-8"
+    )
+
+    resolved = load_manifest(manifest_path)
+
+    assert resolved.manifest.environment.dsh.session_log_root == "C:/Users/test/.dsh/sessions"
+
+
 def test_manifest_rejects_secret_key(tmp_path) -> None:
     manifest_path = write_experiment(tmp_path, "api_key: not-allowed\n")
 

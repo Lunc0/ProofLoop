@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -35,6 +36,7 @@ class DshConfig(StrictModel):
     runner: Literal["fake", "dsh"] = "fake"
     fake_output: str | None = None
     binary: str = "dsh"
+    session_log_root: str | None = None
     runner_args: tuple[str, ...] = ()
     timeout_ms: int = Field(default=300_000, ge=1_000, le=3_600_000)
 
@@ -127,12 +129,24 @@ class CaseConfig(StrictModel):
     slice: Literal["fast", "dev", "held_out"]
     prompt: str = Field(min_length=1)
     expected_query: str = Field(min_length=1)
+    context_files: tuple[str, ...] = ()
 
     @field_validator("id")
     @classmethod
     def validate_id(cls, value: str) -> str:
         if not IDENTIFIER_PATTERN.fullmatch(value):
             raise ValueError("case id must be a lowercase identifier")
+        return value
+
+    @field_validator("context_files")
+    @classmethod
+    def validate_context_files(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for path in value:
+            pure_path = PurePosixPath(path)
+            if not path or "\\" in path or pure_path.is_absolute() or ".." in pure_path.parts:
+                raise ValueError("case context_files must be relative POSIX paths")
+        if len(value) != len(set(value)):
+            raise ValueError("case context_files must not contain duplicates")
         return value
 
 

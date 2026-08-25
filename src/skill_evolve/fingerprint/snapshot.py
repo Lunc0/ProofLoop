@@ -65,6 +65,11 @@ def _collect_artifacts(resolved: ResolvedManifest) -> tuple[FileDigest, ...]:
     declared.extend(
         (f"tools.{tool_id}.manifest", path) for tool_id, path in resolved.tool_manifests
     )
+    declared.extend(
+        (f"cases.{case_id}.context[{index}]", path)
+        for case_id, paths in resolved.case_context_files
+        for index, path in enumerate(paths)
+    )
     return tuple(
         FileDigest(
             name=name,
@@ -106,6 +111,7 @@ def _canonical_manifest(value: Any) -> dict[str, Any]:
         "manifest",
         "schema",
         "seed",
+        "context_files",
     }
 
     def normalise(item: Any) -> Any:

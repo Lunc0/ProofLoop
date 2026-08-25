@@ -19,10 +19,16 @@ from skill_evolve.reporting.artifacts import (
     build_report,
     build_skill_change_suggestion,
 )
-from skill_evolve.runner.contracts import RunInput, RunnerError, RunnerExecution
+from skill_evolve.runner.contracts import (
+    ReadOnlyDatabaseAccess,
+    RunInput,
+    RunnerError,
+    RunnerExecution,
+)
 from skill_evolve.runner.dsh import DshRunner
 from skill_evolve.runner.fake import FakeRunner
 from skill_evolve.sql.postgres import FixtureError, PostgresFixture
+from skill_evolve.sql.readonly_service import ReadOnlyQueryService
 
 
 @dataclass(frozen=True)
@@ -62,9 +68,26 @@ def run_experiment(
     )
 
     try:
-        execution = _run_runner(resolved, run, snapshot, selected_cases)
+        if resolved.manifest.environment.dsh.runner == "dsh":
+            with PostgresFixture(
+                resolved.manifest.environment.database,
+                resolved.manifest.environment.evaluator,
+                resolved.schema_file,
+                resolved.seed_file,
+            ) as exploration_fixture, ReadOnlyQueryService(exploration_fixture) as query_service:
+                execution = _run_runner(
+                    resolved,
+                    run,
+                    snapshot,
+                    selected_cases,
+                    ReadOnlyDatabaseAccess(query_endpoint=query_service.endpoint),
+                )
+        else:
+            execution = _run_runner(resolved, run, snapshot, selected_cases)
     except RunnerError as error:
         return _finish_paused_run(run, snapshot, (), "runner_evidence_invalid", str(error))
+    except FixtureError as error:
+        return _finish_paused_run(run, snapshot, (), "postgres_fixture_invalid", str(error))
 
     run.write_bytes("raw/runner-output.json", execution.raw_output)
     for artifact in execution.raw_artifacts:
@@ -115,6 +138,7 @@ def _run_runner(
     run: RunDirectory,
     snapshot: EnvironmentSnapshot,
     selected_cases: tuple[CaseConfig, ...],
+    database_access: ReadOnlyDatabaseAccess | None = None,
 ) -> RunnerExecution:
     if resolved.fake_output is not None:
         run.write_bytes("raw/runner-output.json", resolved.fake_output.read_bytes())
@@ -124,6 +148,11 @@ def _run_runner(
         environment_fingerprint=snapshot.fingerprint,
         candidate_ref=resolved.manifest.candidate.ref,
         cases=selected_cases,
+        schema_file=resolved.schema_file,
+        candidate_file=resolved.candidate_digest_file,
+        case_context_files=resolved.case_context_files,
+        agent_workspace_root=run.path / "agent-workspace",
+        database_access=database_access,
     )
     if resolved.manifest.environment.dsh.runner == "fake":
         if resolved.fake_output is None:
