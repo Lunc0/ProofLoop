@@ -11,7 +11,7 @@
 - Conservative `skill` versus `eval_data` attribution, with regression drafts or repair checklists.
 - Self-contained run artifacts and `rerun` from copied inputs.
 
-The real DSH runner, parallel scheduling, automatic Skill editing and champion promotion are intentionally deferred.
+真实 DSH runner 已支持 headless profile；并发调度、自动 Skill 修改与 champion promotion 仍明确延后。
 
 ## Prerequisites
 
@@ -31,6 +31,16 @@ uv sync --all-groups
 uv run skill-evolve validate examples/sql-agent/experiment.yaml
 uv run skill-evolve run examples/sql-agent/experiment.yaml --suite fast
 ```
+
+真实 DSH + DeepSeek 示例使用独立 manifest：
+
+```powershell
+Copy-Item examples/sql-agent/.env.example examples/sql-agent/.env
+uv run skill-evolve validate examples/sql-agent/experiment.dsh.yaml
+uv run skill-evolve run examples/sql-agent/experiment.dsh.yaml --suite fast
+```
+
+参见[本机配置说明](docs/configuration.md)：manifest 固定实验定义，`.env` 仅保存本机配置与凭据。
 
 The command prints a run ID and writes evidence under `runs/<run-id>/`:
 

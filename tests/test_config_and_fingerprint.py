@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from skill_evolve.config import ManifestError, load_manifest
+from skill_evolve.config.models import DshConfig
 from skill_evolve.fingerprint import create_snapshot
+from skill_evolve.runner.contracts import RawArtifact
 from tests.conftest import write_experiment
 
 
@@ -36,6 +39,37 @@ def test_snapshot_changes_when_fixture_changes(tmp_path) -> None:
     assert before.fingerprint != after.fingerprint
 
 
+def test_workspace_dotenv_resolves_only_dsh_binary_and_changes_fingerprint(tmp_path) -> None:
+    manifest_path = write_experiment(tmp_path)
+    before = create_snapshot(load_manifest(manifest_path))
+    (tmp_path / ".env").write_text(
+        "DEEPSEEK_API_KEY=must-not-be-read-or-persisted\n"
+        "SKILL_EVOLVE_DSH_BINARY='C:/Tools/dsh.exe'\n",
+        encoding="utf-8",
+    )
+
+    resolved = load_manifest(manifest_path)
+    after = create_snapshot(resolved)
+
+    assert resolved.manifest.environment.dsh.binary == "C:/Tools/dsh.exe"
+    assert before.fingerprint != after.fingerprint
+    assert "must-not-be-read-or-persisted" not in str(after.to_dict())
+
+
+def test_process_dsh_binary_override_takes_precedence_over_workspace_dotenv(
+    monkeypatch, tmp_path
+) -> None:
+    manifest_path = write_experiment(tmp_path)
+    (tmp_path / ".env").write_text(
+        "SKILL_EVOLVE_DSH_BINARY=from-dotenv\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("SKILL_EVOLVE_DSH_BINARY", "from-process")
+
+    resolved = load_manifest(manifest_path)
+
+    assert resolved.manifest.environment.dsh.binary == "from-process"
+
+
 def test_manifest_rejects_secret_key(tmp_path) -> None:
     manifest_path = write_experiment(tmp_path, "api_key: not-allowed\n")
 
@@ -59,3 +93,19 @@ def test_selecting_empty_slice_is_an_error(tmp_path) -> None:
 
     with pytest.raises(ManifestError, match="contains no cases"):
         resolved.select_cases("held_out")
+
+
+def test_dsh_runner_args_reject_credential_options() -> None:
+    with pytest.raises(ValidationError, match="must not contain credential"):
+        DshConfig(
+            version="0.1.1-rc.2",
+            profile="headless",
+            runner="dsh",
+            runner_args=("--api-key", "not-a-secret-here"),
+        )
+
+
+@pytest.mark.parametrize("path", ("../outside.log", "dsh\\windows.log", "/absolute.log"))
+def test_raw_artifact_rejects_unsafe_paths(path: str) -> None:
+    with pytest.raises(ValueError, match="relative POSIX"):
+        RawArtifact(relative_path=path, content=b"evidence")

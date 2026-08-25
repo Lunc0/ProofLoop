@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -62,10 +62,30 @@ class RunInput:
 
 
 @dataclass(frozen=True)
+class RawArtifact:
+    """A redacted, runner-produced file to retain below a run's ``raw/`` directory."""
+
+    relative_path: str
+    content: bytes
+
+    def __post_init__(self) -> None:
+        path = PurePosixPath(self.relative_path)
+        if (
+            not self.relative_path
+            or "\\" in self.relative_path
+            or path.is_absolute()
+            or ".." in path.parts
+            or path == PurePosixPath(".")
+        ):
+            raise ValueError("raw artifact path must be a non-empty relative POSIX path")
+
+
+@dataclass(frozen=True)
 class RunnerExecution:
     output: RunnerOutput
     raw_output: bytes
     stderr: str = ""
+    raw_artifacts: tuple[RawArtifact, ...] = ()
 
 
 class Runner(Protocol):

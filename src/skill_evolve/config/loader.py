@@ -10,6 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from skill_evolve.config.models import CaseConfig, ExperimentManifest
+from skill_evolve.config.runtime import resolve_dsh_config
 
 SENSITIVE_KEY_FRAGMENTS = ("api_key", "password", "secret", "token", "authorization")
 
@@ -54,6 +55,16 @@ def load_manifest(path: Path) -> ResolvedManifest:
         manifest = ExperimentManifest.model_validate(raw)
     except ValidationError as error:
         raise ManifestError(f"invalid manifest: {error}") from error
+    try:
+        manifest = manifest.model_copy(
+            update={
+                "environment": manifest.environment.model_copy(
+                    update={"dsh": resolve_dsh_config(manifest.environment.dsh, workspace)}
+                )
+            }
+        )
+    except ValidationError as error:
+        raise ManifestError(f"invalid DSH runtime override: {error}") from error
 
     candidate_file = _resolve_optional(
         workspace, manifest.candidate.digest_file, "candidate.digest_file"

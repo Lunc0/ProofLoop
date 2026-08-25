@@ -67,6 +67,8 @@ def run_experiment(
         return _finish_paused_run(run, snapshot, (), "runner_evidence_invalid", str(error))
 
     run.write_bytes("raw/runner-output.json", execution.raw_output)
+    for artifact in execution.raw_artifacts:
+        run.write_bytes(f"raw/{artifact.relative_path}", artifact.content)
     if execution.stderr:
         run.write_text("raw/runner.stderr.log", execution.stderr)
     run.write_json(
@@ -127,7 +129,7 @@ def _run_runner(
         if resolved.fake_output is None:
             raise RunnerError("fake runner requires a fake output file")
         return FakeRunner(resolved.fake_output).run(input)
-    return DshRunner().run(input)
+    return DshRunner(resolved.manifest.environment.dsh, resolved.profile_patch).run(input)
 
 
 def _finish_paused_run(

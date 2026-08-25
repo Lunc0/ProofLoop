@@ -34,6 +34,28 @@ class DshConfig(StrictModel):
     profile_patch: str | None = None
     runner: Literal["fake", "dsh"] = "fake"
     fake_output: str | None = None
+    binary: str = "dsh"
+    runner_args: tuple[str, ...] = ()
+    timeout_ms: int = Field(default=300_000, ge=1_000, le=3_600_000)
+
+    @field_validator("binary")
+    @classmethod
+    def validate_binary(cls, value: str) -> str:
+        if not value.strip() or "\x00" in value:
+            raise ValueError("dsh.binary must be a non-empty executable path or command name")
+        return value
+
+    @field_validator("runner_args")
+    @classmethod
+    def validate_runner_args(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        forbidden_fragments = ("api_key", "password", "secret", "token", "authorization")
+        for argument in value:
+            normalized = argument.lower().replace("-", "_")
+            if not argument or "\x00" in argument:
+                raise ValueError("dsh.runner_args must contain non-empty strings without NUL bytes")
+            if any(fragment in normalized for fragment in forbidden_fragments):
+                raise ValueError("dsh.runner_args must not contain credential options or values")
+        return value
 
     @model_validator(mode="after")
     def validate_runner_config(self) -> DshConfig:
