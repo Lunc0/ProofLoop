@@ -23,6 +23,7 @@ from skill_evolve.runner.contracts import (
 from skill_evolve.runner.dsh_session import (
     DshSessionLogError,
     LoadedDshSessionLog,
+    SessionLogSignature,
     find_changed_session_logs,
     load_session_log,
     normalise_session_log,
@@ -108,6 +109,12 @@ class DshRunner:
                 stdout,
                 stderr,
                 f"DSH timed out after {self._config.timeout_ms} ms",
+                _failure_session_artifacts(
+                    case.id,
+                    session_before,
+                    self._config.session_log_root,
+                    workspace,
+                ),
             )
         except OSError as error:
             return self._failed_case(
@@ -130,7 +137,15 @@ class DshRunner:
                     stdout,
                     f"DSH exited with code {completed.returncode}",
                 ),
-                artifacts,
+                (
+                    *artifacts,
+                    *_failure_session_artifacts(
+                        case.id,
+                        session_before,
+                        self._config.session_log_root,
+                        workspace,
+                    ),
+                ),
                 stderr,
             )
 
@@ -231,13 +246,17 @@ class DshRunner:
         stdout: str,
         stderr: str,
         reason: str,
+        session_artifacts: tuple[RawArtifact, ...] = (),
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
         redacted_stdout = redact_text(stdout)
         redacted_stderr = redact_text(stderr)
         return (
             _runner_error_output(case, timestamp, redacted_stdout, reason),
-            _case_artifacts(
-                case.id, command, redacted_stdout, redacted_stderr, self._config.timeout_ms
+            (
+                *_case_artifacts(
+                    case.id, command, redacted_stdout, redacted_stderr, self._config.timeout_ms
+                ),
+                *session_artifacts,
             ),
             redacted_stderr,
         )
@@ -410,6 +429,40 @@ def _case_artifacts(
         ),
         RawArtifact(
             relative_path=f"dsh/{case_id}.stderr.log", content=stderr.encode("utf-8")
+        ),
+    )
+
+
+def _failure_session_artifacts(
+    case_id: str,
+    session_before: dict[Path, SessionLogSignature] | None,
+    session_log_root: str | None,
+    workspace: Path,
+) -> tuple[RawArtifact, ...]:
+    """Preserve a changed DSH session even when its turn did not complete.
+
+    An interrupted session cannot be normalised into a completed trajectory, but its
+    redacted event stream remains essential failure evidence. Capture failures are
+    kept as a separate artifact so the primary process failure is not obscured.
+    """
+
+    if session_before is None or session_log_root is None:
+        return ()
+    try:
+        _, session_log = _session_log_for_workspace(
+            find_changed_session_logs(session_before, Path(session_log_root)), workspace
+        )
+    except DshSessionLogError as error:
+        return (
+            RawArtifact(
+                relative_path=f"dsh/{case_id}.session-capture-error.log",
+                content=(redact_text(str(error)) + "\n").encode("utf-8"),
+            ),
+        )
+    return (
+        RawArtifact(
+            relative_path=f"dsh/{case_id}.session.jsonl",
+            content=session_log.redacted_jsonl,
         ),
     )
 

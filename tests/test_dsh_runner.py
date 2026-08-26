@@ -217,6 +217,49 @@ def test_dsh_runner_treats_nonzero_exit_as_runner_evidence_failure_and_redacts(
     assert "<redacted>" in artifacts["dsh/customer-count.stderr.log"]
 
 
+@pytest.mark.parametrize("failure", ("timeout", "nonzero-exit"))
+def test_dsh_runner_preserves_changed_session_log_on_process_failure(
+    monkeypatch, tmp_path, failure: str
+) -> None:
+    session_root = tmp_path / "sessions"
+    session_root.mkdir()
+    session_path = session_root / "session.jsonl.zstd"
+    session_path.write_bytes(b"compressed-log")
+    config = DshConfig(
+        version="0.1.1-rc.2",
+        profile="headless",
+        runner="dsh",
+        session_log_root=str(session_root),
+    )
+    loaded_log = LoadedDshSessionLog(
+        events=(), redacted_jsonl=b'{"type":"session"}\n'
+    )
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, 300, output="partial output", stderr="")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="failed")
+
+    monkeypatch.setattr("skill_evolve.runner.dsh.subprocess.run", fake_run)
+    monkeypatch.setattr("skill_evolve.runner.dsh.snapshot_session_logs", lambda root: {})
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh.find_changed_session_logs", lambda before, root: (session_path,)
+    )
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh._session_log_for_workspace",
+        lambda candidates, workspace: (session_path, loaded_log),
+    )
+
+    execution = DshRunner(config, None).run(_run_input(tmp_path))
+
+    case = execution.output.cases[0]
+    artifacts = {artifact.relative_path: artifact.content for artifact in execution.raw_artifacts}
+    assert case.status == "runner_error"
+    assert case.candidate_sql is None
+    assert artifacts["dsh/customer-count.session.jsonl"] == loaded_log.redacted_jsonl
+
+
 @pytest.mark.skipif(os.name != "nt", reason="npm command shims are Windows-specific")
 def test_dsh_runner_uses_node_entry_for_a_windows_npm_shim(monkeypatch, tmp_path) -> None:
     shim_dir = tmp_path / "npm"
