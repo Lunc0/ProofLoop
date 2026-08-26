@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from skill_evolve.attribution.core import Attribution, RunStatus, attribute, eval_data_failure
+from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.loader import ResolvedManifest, load_manifest
 from skill_evolve.config.models import CaseConfig
 from skill_evolve.evaluator.core import CaseEvaluation, evaluate_case
@@ -47,25 +48,28 @@ def run_experiment(
     manifest_path: Path,
     suite: str | None,
     runs_root: Path,
+    candidate: ResolvedCandidate | None = None,
 ) -> RunOutcome:
     """Execute a single run, producing immutable evidence even when it pauses."""
 
     resolved = load_manifest(manifest_path)
     selected_cases = resolved.select_cases(suite)
-    snapshot = create_snapshot(resolved)
+    snapshot = create_snapshot(resolved, candidate)
     run = RunStore(runs_root).create()
     run.materialise_manifest(resolved)
+    if candidate is not None:
+        run.materialise_candidate(candidate)
     run.write_json("environment.json", snapshot.to_dict())
-    run.write_json(
-        "run.json",
-        {
+    run_metadata: dict[str, Any] = {
             "schema_version": "v1",
             "run_id": run.run_id,
             "experiment": resolved.manifest.experiment,
             "requested_suite": suite,
             "phase": "snapshotted",
-        },
-    )
+    }
+    if candidate is not None:
+        run_metadata["candidate"] = candidate.public_binding()
+    run.write_json("run.json", run_metadata)
 
     try:
         if resolved.manifest.environment.dsh.runner == "dsh":
@@ -81,9 +85,10 @@ def run_experiment(
                     snapshot,
                     selected_cases,
                     ReadOnlyDatabaseAccess(query_endpoint=query_service.endpoint),
+                    candidate,
                 )
         else:
-            execution = _run_runner(resolved, run, snapshot, selected_cases)
+            execution = _run_runner(resolved, run, snapshot, selected_cases, candidate=candidate)
     except RunnerError as error:
         return _finish_paused_run(run, snapshot, (), "runner_evidence_invalid", str(error))
     except FixtureError as error:
@@ -139,6 +144,7 @@ def _run_runner(
     snapshot: EnvironmentSnapshot,
     selected_cases: tuple[CaseConfig, ...],
     database_access: ReadOnlyDatabaseAccess | None = None,
+    candidate: ResolvedCandidate | None = None,
 ) -> RunnerExecution:
     if resolved.fake_output is not None:
         run.write_bytes("raw/runner-output.json", resolved.fake_output.read_bytes())
@@ -146,10 +152,13 @@ def _run_runner(
         run_id=run.run_id,
         workspace=resolved.workspace,
         environment_fingerprint=snapshot.fingerprint,
-        candidate_ref=resolved.manifest.candidate.ref,
+        candidate_ref=(
+            candidate.candidate_id if candidate is not None else resolved.manifest.candidate.ref
+        ),
         cases=selected_cases,
         schema_file=resolved.schema_file,
         candidate_file=resolved.candidate_digest_file,
+        candidate=candidate,
         case_context_files=resolved.case_context_files,
         agent_workspace_root=run.path / "agent-workspace",
         database_access=database_access,
@@ -192,6 +201,8 @@ def _finish_run(
         "summary": _summary(evaluations),
         "cases": [evaluation.to_dict() for evaluation in evaluations],
     }
+    if snapshot.candidate is not None:
+        result["candidate"] = snapshot.candidate
     run.write_json("result.json", result)
     run.write_text(
         "report.md", build_report(run.run_id, snapshot.fingerprint, attribution, evaluations)

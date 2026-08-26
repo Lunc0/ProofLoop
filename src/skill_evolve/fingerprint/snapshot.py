@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.loader import ResolvedManifest
 
 
@@ -23,16 +24,22 @@ class EnvironmentSnapshot:
     fingerprint: str
     manifest: dict[str, Any]
     artifacts: tuple[FileDigest, ...]
+    candidate: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "environment_fingerprint": self.fingerprint,
             "manifest": self.manifest,
             "artifacts": [asdict(artifact) for artifact in self.artifacts],
         }
+        if self.candidate is not None:
+            result["candidate"] = self.candidate
+        return result
 
 
-def create_snapshot(resolved: ResolvedManifest) -> EnvironmentSnapshot:
+def create_snapshot(
+    resolved: ResolvedManifest, candidate: ResolvedCandidate | None = None
+) -> EnvironmentSnapshot:
     """Hash all declared, non-secret experiment inputs."""
 
     artifacts = _collect_artifacts(resolved)
@@ -43,11 +50,14 @@ def create_snapshot(resolved: ResolvedManifest) -> EnvironmentSnapshot:
         "manifest": canonical_manifest,
         "artifacts": [{"name": artifact.name, "sha256": artifact.sha256} for artifact in artifacts],
     }
+    if candidate is not None:
+        payload["candidate"] = candidate.public_binding()
     fingerprint = _sha256_text(_canonical_json(payload))
     return EnvironmentSnapshot(
         fingerprint=fingerprint,
         manifest=canonical_manifest,
         artifacts=artifacts,
+        candidate=candidate.public_binding() if candidate is not None else None,
     )
 
 

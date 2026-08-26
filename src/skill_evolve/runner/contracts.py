@@ -8,6 +8,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import CaseConfig
 
 
@@ -68,6 +69,7 @@ class RunInput:
     cases: tuple[CaseConfig, ...]
     schema_file: Path | None = None
     candidate_file: Path | None = None
+    candidate: ResolvedCandidate | None = None
     case_context_files: tuple[tuple[str, tuple[Path, ...]], ...] = ()
     agent_workspace_root: Path | None = None
     database_access: ReadOnlyDatabaseAccess | None = None

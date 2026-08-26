@@ -17,6 +17,7 @@ from skill_evolve.benchmark.livesqlbench import (
     public_evaluation_dict,
     public_summary,
 )
+from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import CaseConfig, DshConfig, EvaluatorConfig, ModelConfig
 from skill_evolve.evaluator.core import CaseEvaluation
 from skill_evolve.registry.store import RunDirectory, RunStore
@@ -60,11 +61,12 @@ def run_base_lite_dsh(
     profile_patch: Path | None,
     model: ModelConfig,
     runs_root: Path,
+    candidate: ResolvedCandidate | None = None,
 ) -> LiveSQLBenchRunOutcome:
     """Run five public tasks serially and score them without persisting GT material."""
 
     return run_base_lite_dsh_suite(
-        load_base_lite_suite(data_root), dsh_config, profile_patch, model, runs_root
+        load_base_lite_suite(data_root), dsh_config, profile_patch, model, runs_root, candidate
     )
 
 
@@ -74,14 +76,15 @@ def run_base_lite_dsh_suite(
     profile_patch: Path | None,
     model: ModelConfig,
     runs_root: Path,
+    candidate: ResolvedCandidate | None = None,
 ) -> LiveSQLBenchRunOutcome:
     """Run one already-validated Base-Lite suite through the existing DSH boundary."""
 
     if dsh_config.runner != "dsh":
         raise LiveSQLBenchRunError("LiveSQLBench automatic runs require dsh.runner: dsh")
-    environment_fingerprint = _environment_fingerprint(suite, dsh_config, model)
+    environment_fingerprint = _environment_fingerprint(suite, dsh_config, model, candidate)
     run = RunStore(runs_root).create()
-    _write_initial_run_evidence(run, suite, dsh_config, model, environment_fingerprint)
+    _write_initial_run_evidence(run, suite, dsh_config, model, environment_fingerprint, candidate)
     evaluations: list[CaseEvaluation] = []
     runner_cases: list[RunnerCaseOutput] = []
     trajectories: list[dict[str, Any]] = []
@@ -90,7 +93,7 @@ def run_base_lite_dsh_suite(
     for case in suite.cases:
         try:
             runner_case, execution, evaluation = _run_case(
-                case, suite, dsh_config, profile_patch, run
+                case, suite, dsh_config, profile_patch, run, environment_fingerprint, candidate
             )
         except (LiveSQLBenchFixtureError, RunnerError) as error:
             return _finish_paused_run(
@@ -98,6 +101,7 @@ def run_base_lite_dsh_suite(
                 environment_fingerprint,
                 tuple(evaluations),
                 f"live_fixture_or_runner_invalid: {type(error).__name__}",
+                candidate,
             )
         evaluations.append(evaluation)
         runner_cases.append(runner_case)
@@ -112,7 +116,7 @@ def run_base_lite_dsh_suite(
     if stderr_parts:
         run.write_text("raw/runner.stderr.log", "\n\n".join(stderr_parts))
     run.write_json("trajectory.json", {"cases": trajectories})
-    return _finish_run(run, environment_fingerprint, tuple(evaluations))
+    return _finish_run(run, environment_fingerprint, tuple(evaluations), candidate)
 
 
 def _run_case(
@@ -121,6 +125,8 @@ def _run_case(
     dsh_config: DshConfig,
     profile_patch: Path | None,
     run: RunDirectory,
+    environment_fingerprint: str,
+    candidate: ResolvedCandidate | None,
 ) -> tuple[RunnerCaseOutput, RunnerExecution, CaseEvaluation]:
     evaluator = EvaluatorConfig(version=_EVALUATOR_VERSION)
     runner_case_config = _runner_case_config(case)
@@ -129,10 +135,11 @@ def _run_case(
             input = RunInput(
                 run_id=run.run_id,
                 workspace=suite.data_root,
-                environment_fingerprint="live-sql-bench",
-                candidate_ref=None,
+                environment_fingerprint=environment_fingerprint,
+                candidate_ref=candidate.candidate_id if candidate is not None else None,
                 cases=(runner_case_config,),
                 schema_file=case.schema_file,
+                candidate=candidate,
                 case_context_files=((case.instance_id, case.public_context_files[1:]),),
                 agent_workspace_root=run.path / "agent-workspace",
                 database_access=ReadOnlyDatabaseAccess(query_endpoint=query_service.endpoint),
@@ -170,27 +177,37 @@ def _write_initial_run_evidence(
     dsh_config: DshConfig,
     model: ModelConfig,
     environment_fingerprint: str,
+    candidate: ResolvedCandidate | None,
 ) -> None:
+    candidate_binding = candidate.public_binding() if candidate is not None else None
+    environment: dict[str, Any] = {
+        "environment_fingerprint": environment_fingerprint,
+        "benchmark": suite.public_summary(),
+        "dsh": dsh_config.model_dump(mode="json"),
+        "model": model.model_dump(mode="json"),
+        "evaluator": {"version": _EVALUATOR_VERSION},
+    }
+    if candidate_binding is not None:
+        environment["candidate"] = candidate_binding
     run.write_json(
         "environment.json",
-        {
-            "environment_fingerprint": environment_fingerprint,
-            "benchmark": suite.public_summary(),
-            "dsh": dsh_config.model_dump(mode="json"),
-            "model": model.model_dump(mode="json"),
-            "evaluator": {"version": _EVALUATOR_VERSION},
-        },
+        environment,
     )
+    run_metadata: dict[str, Any] = {
+        "schema_version": "livesqlbench-v1",
+        "run_id": run.run_id,
+        "benchmark": "livesqlbench-base-lite",
+        "requested_suite": "fast",
+        "phase": "snapshotted",
+    }
+    if candidate_binding is not None:
+        run_metadata["candidate"] = candidate_binding
     run.write_json(
         "run.json",
-        {
-            "schema_version": "livesqlbench-v1",
-            "run_id": run.run_id,
-            "benchmark": "livesqlbench-base-lite",
-            "requested_suite": "fast",
-            "phase": "snapshotted",
-        },
+        run_metadata,
     )
+    if candidate is not None:
+        run.materialise_candidate(candidate)
 
 
 def _write_runner_artifacts(
@@ -218,21 +235,26 @@ def _finish_paused_run(
     environment_fingerprint: str,
     evaluations: tuple[CaseEvaluation, ...],
     reason: str,
+    candidate: ResolvedCandidate | None,
 ) -> LiveSQLBenchRunOutcome:
     attribution = eval_data_failure(reason)
-    return _write_final_run_evidence(run, environment_fingerprint, evaluations, attribution)
+    return _write_final_run_evidence(
+        run, environment_fingerprint, evaluations, attribution, candidate
+    )
 
 
 def _finish_run(
     run: RunDirectory,
     environment_fingerprint: str,
     evaluations: tuple[CaseEvaluation, ...],
+    candidate: ResolvedCandidate | None,
 ) -> LiveSQLBenchRunOutcome:
     return _write_final_run_evidence(
         run,
         environment_fingerprint,
         evaluations,
         attribute(evaluations),
+        candidate,
     )
 
 
@@ -241,13 +263,12 @@ def _write_final_run_evidence(
     environment_fingerprint: str,
     evaluations: tuple[CaseEvaluation, ...],
     attribution: Attribution,
+    candidate: ResolvedCandidate | None,
 ) -> LiveSQLBenchRunOutcome:
     public_evaluations = [public_evaluation_dict(evaluation) for evaluation in evaluations]
     run.write_json("evaluation.json", {"cases": public_evaluations})
     run.write_json("attribution.json", attribution.to_dict())
-    run.write_json(
-        "result.json",
-        {
+    result: dict[str, Any] = {
             "schema_version": "livesqlbench-v1",
             "run_id": run.run_id,
             "environment_fingerprint": environment_fingerprint,
@@ -255,8 +276,10 @@ def _write_final_run_evidence(
             "attribution": attribution.to_dict(),
             "summary": public_summary(evaluations),
             "cases": public_evaluations,
-        },
-    )
+    }
+    if candidate is not None:
+        result["candidate"] = candidate.public_binding()
+    run.write_json("result.json", result)
     run.write_text(
         "report.md",
         build_report(run.run_id, environment_fingerprint, attribution, evaluations),
@@ -270,7 +293,10 @@ def _write_final_run_evidence(
 
 
 def _environment_fingerprint(
-    suite: LiveSQLBenchSuite, dsh_config: DshConfig, model: ModelConfig
+    suite: LiveSQLBenchSuite,
+    dsh_config: DshConfig,
+    model: ModelConfig,
+    candidate: ResolvedCandidate | None,
 ) -> str:
     payload = {
         "benchmark": "livesqlbench-base-lite",
@@ -279,5 +305,7 @@ def _environment_fingerprint(
         "model": model.model_dump(mode="json"),
         "evaluator": _EVALUATOR_VERSION,
     }
+    if candidate is not None:
+        payload["candidate"] = candidate.public_binding()
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

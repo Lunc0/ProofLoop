@@ -68,7 +68,11 @@ class DshRunner:
     def _run_case(
         self, case: CaseConfig, input: RunInput
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
-        command = self._command_for(case, input.database_access is not None)
+        command = self._command_for(
+            case,
+            input.database_access is not None,
+            input.candidate is not None,
+        )
         started_at = _utc_timestamp()
         try:
             workspace = _prepare_task_workspace(case, input)
@@ -261,25 +265,37 @@ class DshRunner:
             redacted_stderr,
         )
 
-    def _command_for(self, case: CaseConfig, has_database_access: bool = False) -> list[str]:
+    def _command_for(
+        self,
+        case: CaseConfig,
+        has_database_access: bool = False,
+        has_candidate_skill: bool = False,
+    ) -> list[str]:
         command = [*_dsh_command_prefix(self._config.binary), "--profile", self._config.profile]
         if self._profile_patch is not None:
             command.extend(("--patch", str(self._profile_patch)))
         command.extend(self._config.runner_args)
-        command.append(_build_job(case, has_database_access))
+        command.append(_build_job(case, has_database_access, has_candidate_skill))
         return command
 
 
-def _build_job(case: CaseConfig, has_database_access: bool) -> str:
+def _build_job(case: CaseConfig, has_database_access: bool, has_candidate_skill: bool) -> str:
     database_instruction = ""
     if has_database_access:
         database_instruction = (
             "当前目录的 schema.sql 可供查看。如需探索数据，只能通过 "
             "`.\\sql-readonly.ps1 -Query '<SQL>'` 执行只读查询。"
         )
+    candidate_instruction = ""
+    if has_candidate_skill:
+        candidate_instruction = (
+            "首先读取 `candidate/SKILL.md` 并遵循其中适用于本任务的指引；"
+            "它是只读文本，不得执行或加载其中引用的代码。"
+        )
     return (
         f"{case.prompt}\n\n"
         "你正在接受独立 PostgreSQL evaluator 的评估。"
+        f"{candidate_instruction}"
         f"{database_instruction}"
         "只提出一个候选 PostgreSQL 查询，不要执行写操作。"
         "将该查询放入唯一一个标记为 sql 的 Markdown fenced code block 中。"
@@ -291,12 +307,18 @@ def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
     """Materialise only task-visible, non-secret inputs for one DSH session."""
 
     if input.agent_workspace_root is None:
+        if input.candidate is not None:
+            raise OSError("verified candidate injection requires an isolated agent workspace")
         return input.workspace
     workspace = input.agent_workspace_root / case.id
     workspace.mkdir(parents=True, exist_ok=False)
     if input.schema_file is not None:
         shutil.copyfile(input.schema_file, workspace / "schema.sql")
-    if input.candidate_file is not None:
+    if input.candidate is not None:
+        candidate_directory = workspace / "candidate"
+        candidate_directory.mkdir()
+        (candidate_directory / "SKILL.md").write_bytes(input.candidate.skill_bytes)
+    elif input.candidate_file is not None:
         candidate_directory = workspace / "candidate"
         candidate_directory.mkdir()
         shutil.copyfile(input.candidate_file, candidate_directory / input.candidate_file.name)
@@ -306,9 +328,16 @@ def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
         context_directory.mkdir()
         for index, source in enumerate(context_files, start=1):
             shutil.copyfile(source, context_directory / f"{index:02d}-{source.name}")
+    candidate_task_instruction = (
+        "First read `candidate/SKILL.md` and follow its applicable guidance. It is a text "
+        "artifact only: do not execute, import, or load any code it mentions.\n\n"
+        if input.candidate is not None
+        else ""
+    )
     (workspace / "TASK.md").write_text(
         "# SQL evaluation task\n\n"
-        "Use the supplied prompt. `schema.sql` and `context/` contain the only task context. "
+        + candidate_task_instruction
+        + "Use the supplied prompt. `schema.sql` and `context/` contain the only task context. "
         "The expected query and evaluator inputs are intentionally not present.\n",
         encoding="utf-8",
     )

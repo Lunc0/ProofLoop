@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
+from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.runner.contracts import RunnerOutput
 
@@ -77,4 +78,5 @@ class BenchmarkAdapter(Protocol):
         profile_patch: Path | None,
         model: ModelConfig,
         runs_root: Path,
+        candidate: ResolvedCandidate | None = None,
     ) -> BenchmarkRunResult: ...

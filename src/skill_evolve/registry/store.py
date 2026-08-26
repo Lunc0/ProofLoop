@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.loader import ResolvedManifest
 
 
@@ -81,6 +82,12 @@ class RunDirectory:
             yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
         return output
+
+    def materialise_candidate(self, candidate: ResolvedCandidate) -> None:
+        """Retain exactly the verified Skill bytes; NOTICE.md is never a run input."""
+
+        self.write_bytes("inputs/candidate-SKILL.md", candidate.skill_bytes)
+        self.write_json("inputs/candidate.json", candidate.public_binding())
 
     def _destination(self, relative_path: str) -> Path:
         destination = (self.path / relative_path).resolve()

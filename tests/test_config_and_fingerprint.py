@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from skill_evolve.candidate import CandidateService, LocalCandidateStore
 from skill_evolve.config import ManifestError, load_manifest
 from skill_evolve.config.models import DshConfig
 from skill_evolve.fingerprint import create_snapshot
@@ -37,6 +38,26 @@ def test_snapshot_changes_when_fixture_changes(tmp_path) -> None:
     after = create_snapshot(load_manifest(manifest_path))
 
     assert before.fingerprint != after.fingerprint
+
+
+def test_snapshot_binds_verified_local_candidate_identity_and_hash(tmp_path) -> None:
+    manifest_path = write_experiment(tmp_path / "experiment")
+    skill = tmp_path / "incoming" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text("# Candidate\n", encoding="utf-8")
+    candidate_service = CandidateService(
+        LocalCandidateStore(tmp_path / ".local" / "skill-evolve")
+    )
+    candidate = candidate_service.initialise(
+        "sql-analyst", skill
+    )
+
+    without_candidate = create_snapshot(load_manifest(manifest_path))
+    with_candidate = create_snapshot(load_manifest(manifest_path), candidate)
+
+    assert with_candidate.fingerprint != without_candidate.fingerprint
+    assert with_candidate.candidate == candidate.public_binding()
+    assert "SKILL.md" not in str(with_candidate.to_dict())
 
 
 def test_workspace_dotenv_resolves_only_dsh_binary_and_changes_fingerprint(tmp_path) -> None:

@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 
+from skill_evolve.candidate import CandidateService, ExternalSource, LocalCandidateStore
+from skill_evolve.candidate.store import skill_sha256_for_source
 from skill_evolve.config.models import CaseConfig, DshConfig
 from skill_evolve.runner.contracts import (
     ReadOnlyDatabaseAccess,
@@ -135,6 +137,55 @@ def test_dsh_runner_uses_isolated_task_workspace_with_only_declared_context(
     )
     assert "127.0.0.1:54321" in (workspace / "sql-readonly.ps1").read_text(encoding="utf-8")
     assert execution.output.cases[0].candidate_sql == "SELECT COUNT(*) FROM customers"
+
+
+def test_dsh_runner_injects_only_verified_skill_and_requires_it_to_be_read(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, Any] = {}
+    incoming_skill = tmp_path / "incoming" / "SKILL.md"
+    incoming_notice = tmp_path / "incoming" / "NOTICE.md"
+    incoming_skill.parent.mkdir()
+    incoming_skill.write_text("# Candidate guidance\n", encoding="utf-8")
+    incoming_notice.write_text("MIT License\n", encoding="utf-8")
+    source = ExternalSource(
+        canonical_url="https://github.com/bytebase/dbhub/blob/0123456789abcdef0123456789abcdef01234567/skills/dbhub/SKILL.md",
+        source_repository="bytebase/dbhub",
+        commit="0123456789abcdef0123456789abcdef01234567",
+        file_sha256=skill_sha256_for_source(incoming_skill),
+        license_id="MIT",
+    )
+    candidate_service = CandidateService(
+        LocalCandidateStore(tmp_path / ".local" / "skill-evolve")
+    )
+    candidate = candidate_service.initialise(
+        "dbhub",
+        incoming_skill,
+        candidate_name="000-upstream-baseline",
+        external_source=source,
+        notice_source=incoming_notice,
+    )
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured["cwd"] = kwargs["cwd"]
+        return subprocess.CompletedProcess(command, 0, stdout="```sql\nSELECT 1\n```\n", stderr="")
+
+    monkeypatch.setattr("skill_evolve.runner.dsh.subprocess.run", fake_run)
+    execution = DshRunner(_config(), None).run(
+        replace(
+            _run_input(tmp_path),
+            candidate=candidate,
+            agent_workspace_root=tmp_path / "agent-workspaces",
+        )
+    )
+
+    workspace = captured["cwd"]
+    assert (workspace / "candidate" / "SKILL.md").read_bytes() == candidate.skill_bytes
+    assert not (workspace / "candidate" / "NOTICE.md").exists()
+    assert "candidate/SKILL.md" in (workspace / "TASK.md").read_text(encoding="utf-8")
+    assert "candidate/SKILL.md" in captured["command"][-1]
+    assert execution.output.cases[0].candidate_sql == "SELECT 1"
 
 
 def test_dsh_runner_uses_session_log_as_authoritative_evidence(monkeypatch, tmp_path) -> None:

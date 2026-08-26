@@ -25,6 +25,7 @@ from skill_evolve.benchmark.livesqlbench_run import (
     LiveSQLBenchRunError,
     run_base_lite_dsh_suite,
 )
+from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig
 from skill_evolve.runner.contracts import RunnerCaseOutput, RunnerOutput
 from skill_evolve.sql import LiveSQLBenchFixture, LiveSQLBenchFixtureError
@@ -114,10 +115,11 @@ class LiveSQLBenchBaseLiteAdapter:
         profile_patch: Path | None,
         model: ModelConfig,
         runs_root: Path,
+        candidate: ResolvedCandidate | None = None,
     ) -> BenchmarkRunResult:
         try:
             outcome = run_base_lite_dsh_suite(
-                _suite(suite), dsh_config, profile_patch, model, runs_root
+                _suite(suite), dsh_config, profile_patch, model, runs_root, candidate
             )
         except LiveSQLBenchRunError as error:
             raise BenchmarkAdapterError(str(error)) from error

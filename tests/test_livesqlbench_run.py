@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from skill_evolve.benchmark.livesqlbench_run import run_base_lite_dsh
+from skill_evolve.candidate import CandidateService, LocalCandidateStore
 from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     RawArtifact,
@@ -110,3 +111,56 @@ def test_automatic_run_writes_redacted_session_evidence_without_gt(tmp_path, mon
     assert "expected_query" not in evaluation_json
     result_json = json.loads((outcome.run.path / "result.json").read_text(encoding="utf-8"))
     assert result_json["summary"] == {"pass": 5}
+
+
+def test_automatic_run_binds_verified_candidate_without_notices_or_gt(
+    tmp_path, monkeypatch
+) -> None:
+    captured_candidate_ids: list[str] = []
+
+    class CandidateStubDshRunner(StubDshRunner):
+        def run(self, input) -> RunnerExecution:
+            assert input.candidate is not None
+            assert input.candidate_ref == input.candidate.candidate_id
+            assert input.candidate.skill_bytes == b"# Candidate\n"
+            assert all(
+                "gt" not in path.parts for path in input.context_files_for(input.cases[0].id)
+            )
+            captured_candidate_ids.append(input.candidate.candidate_id)
+            return super().run(input)
+
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", CandidateStubDshRunner
+    )
+    skill = tmp_path / "incoming" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_bytes(b"# Candidate\n")
+    candidate_service = CandidateService(
+        LocalCandidateStore(tmp_path / ".local" / "skill-evolve")
+    )
+    candidate = candidate_service.initialise(
+        "dbhub", skill, candidate_name="000-upstream-baseline"
+    )
+    data_root = _write_base_lite_fixture(tmp_path / "data")
+    outcome = run_base_lite_dsh(
+        data_root,
+        DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh"),
+        None,
+        ModelConfig(provider="test", name="stub"),
+        tmp_path / "runs",
+        candidate,
+    )
+
+    environment = json.loads((outcome.run.path / "environment.json").read_text(encoding="utf-8"))
+    result = json.loads((outcome.run.path / "result.json").read_text(encoding="utf-8"))
+    assert captured_candidate_ids == [candidate.candidate_id] * 5
+    assert environment["candidate"] == candidate.public_binding()
+    assert result["candidate"] == candidate.public_binding()
+    candidate_input = outcome.run.path / "inputs" / "candidate-SKILL.md"
+    assert candidate_input.read_bytes() == candidate.skill_bytes
+    assert not (outcome.run.path / "inputs" / "NOTICE.md").exists()
+    assert "private gold" not in (outcome.run.path / "result.json").read_text(encoding="utf-8")
