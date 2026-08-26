@@ -9,29 +9,27 @@ from typing import Annotated, NoReturn
 import typer
 
 from skill_evolve.benchmark import (
-    LiveSQLBenchDataError,
-    LiveSQLBenchRunError,
-    LiveSQLBenchSuite,
-    evaluate_query_case,
-    load_base_lite_suite,
-    public_evaluation_dict,
-    public_summary,
-    run_base_lite_dsh,
+    BenchmarkAdapter,
+    BenchmarkAdapterError,
+    BenchmarkFixtureError,
+    BenchmarkRunResult,
+    BenchmarkSuite,
+    get_adapter,
 )
+from skill_evolve.benchmark.livesqlbench_adapter import LIVE_SQL_BENCH_DEFAULT_IMAGE
 from skill_evolve.config import ManifestError, load_manifest
-from skill_evolve.config.models import EvaluatorConfig
 from skill_evolve.fingerprint import create_snapshot
 from skill_evolve.registry import RunNotFoundError, RunStore
 from skill_evolve.runner.contracts import RunnerOutput
-from skill_evolve.sql import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.workflow import run_experiment
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+benchmark_app = typer.Typer(add_completion=False, no_args_is_help=True)
 livesqlbench_app = typer.Typer(add_completion=False, no_args_is_help=True)
+app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(livesqlbench_app, name="livesqlbench")
 
-_LIVE_SQL_BENCH_EVALUATOR_VERSION = "livesqlbench-base-lite-soft-ex-v1"
-_LIVE_SQL_BENCH_DEFAULT_IMAGE = "postgres:14.12"
+_LIVE_SQL_BENCH_ADAPTER_ID = "livesqlbench-base-lite"
 
 
 @app.command()
@@ -105,95 +103,114 @@ def rerun(
         raise typer.Exit(outcome.exit_code)
 
 
+@benchmark_app.command("validate")
+def validate_benchmark(
+    adapter_id: str,
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+) -> None:
+    """Validate one explicitly registered local benchmark without printing Gold data."""
+
+    adapter = _load_adapter(adapter_id)
+    suite = _load_benchmark_suite(adapter, data_root)
+    _echo_json(adapter.public_summary(suite))
+
+
+@benchmark_app.command("fixture-check")
+def check_benchmark_fixture(
+    adapter_id: str,
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+    image: Annotated[str, typer.Option("--image")] = LIVE_SQL_BENCH_DEFAULT_IMAGE,
+) -> None:
+    """Restore an adapter's local PostgreSQL fixtures and verify read-only access."""
+
+    adapter = _load_adapter(adapter_id)
+    suite = _load_benchmark_suite(adapter, data_root)
+    try:
+        result = adapter.fixture_check(suite, image)
+    except BenchmarkFixtureError as error:
+        _exit_with_error(str(error), 2)
+    _echo_json(result)
+
+
+@benchmark_app.command("evaluate")
+def evaluate_benchmark(
+    adapter_id: str,
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+    runner_output: Annotated[Path, typer.Argument(dir_okay=False)],
+    image: Annotated[str, typer.Option("--image")] = LIVE_SQL_BENCH_DEFAULT_IMAGE,
+) -> None:
+    """Score runner output locally without printing Gold SQL or query results."""
+
+    adapter = _load_adapter(adapter_id)
+    suite = _load_benchmark_suite(adapter, data_root)
+    output = _load_runner_output(runner_output)
+    try:
+        result = adapter.evaluate(suite, output, image)
+    except BenchmarkFixtureError as error:
+        _exit_with_error(str(error), 2)
+    except BenchmarkAdapterError as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(result)
+
+
+@benchmark_app.command("run")
+def run_benchmark(
+    adapter_id: str,
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+    dsh_manifest: Annotated[Path, typer.Argument(dir_okay=False)],
+) -> None:
+    """Run one benchmark through DSH and retain redacted session evidence."""
+
+    adapter = _load_adapter(adapter_id)
+    suite = _load_benchmark_suite(adapter, data_root)
+    _run_adapter_dsh(adapter, suite, dsh_manifest)
+
+
 @livesqlbench_app.command("validate")
 def validate_livesqlbench(
     data_root: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
 ) -> None:
-    """Validate local Base-Lite public, GT and official dump inputs without printing gold."""
+    """Compatibility entry point for Base-Lite validation."""
 
-    suite = _load_livesqlbench_suite(data_root)
-    typer.echo(json.dumps(suite.public_summary(), indent=2, ensure_ascii=False))
+    adapter = _load_adapter(_LIVE_SQL_BENCH_ADAPTER_ID)
+    suite = _load_benchmark_suite(adapter, data_root)
+    _echo_json(adapter.public_summary(suite))
 
 
 @livesqlbench_app.command("fixture-check")
 def check_livesqlbench_fixture(
     data_root: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
-    image: Annotated[str, typer.Option("--image")] = _LIVE_SQL_BENCH_DEFAULT_IMAGE,
+    image: Annotated[str, typer.Option("--image")] = LIVE_SQL_BENCH_DEFAULT_IMAGE,
 ) -> None:
-    """Restore the five selected databases into a disposable local PostgreSQL fixture."""
+    """Compatibility entry point for Base-Lite fixture verification."""
 
-    suite = _load_livesqlbench_suite(data_root)
-    evaluator = _livesqlbench_evaluator()
+    adapter = _load_adapter(_LIVE_SQL_BENCH_ADAPTER_ID)
+    suite = _load_benchmark_suite(adapter, data_root)
     try:
-        with LiveSQLBenchFixture(
-            suite.dump_root,
-            (case.database_name for case in suite.cases),
-            evaluator,
-            image,
-        ) as fixture:
-            checks = {
-                case.instance_id: fixture.for_database(case.database_name)
-                .execute_read_only("SELECT current_schema()")
-                .ok
-                for case in suite.cases
-            }
-    except LiveSQLBenchFixtureError as error:
+        result = adapter.fixture_check(suite, image)
+    except BenchmarkFixtureError as error:
         _exit_with_error(str(error), 2)
-    typer.echo(
-        json.dumps(
-            {
-                "benchmark": "livesqlbench-base-lite",
-                "fixture": "ready",
-                "checks": checks,
-                "image": image,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
+    _echo_json(result)
 
 
 @livesqlbench_app.command("evaluate")
 def evaluate_livesqlbench(
     data_root: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
     runner_output: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-    image: Annotated[str, typer.Option("--image")] = _LIVE_SQL_BENCH_DEFAULT_IMAGE,
+    image: Annotated[str, typer.Option("--image")] = LIVE_SQL_BENCH_DEFAULT_IMAGE,
 ) -> None:
-    """Score precomputed runner output using local Soft-EX without printing gold SQL."""
+    """Compatibility entry point for local Base-Lite Soft-EX scoring."""
 
-    suite = _load_livesqlbench_suite(data_root)
-    output = _load_livesqlbench_runner_output(runner_output, suite.case_ids)
-    output_by_case = {case.case_id: case for case in output.cases}
-    evaluator = _livesqlbench_evaluator()
+    adapter = _load_adapter(_LIVE_SQL_BENCH_ADAPTER_ID)
+    suite = _load_benchmark_suite(adapter, data_root)
+    output = _load_runner_output(runner_output)
     try:
-        with LiveSQLBenchFixture(
-            suite.dump_root,
-            (case.database_name for case in suite.cases),
-            evaluator,
-            image,
-        ) as fixture:
-            evaluations = tuple(
-                evaluate_query_case(
-                    case,
-                    output_by_case[case.instance_id],
-                    fixture.for_database(case.database_name),
-                )
-                for case in suite.cases
-            )
-    except LiveSQLBenchFixtureError as error:
+        result = adapter.evaluate(suite, output, image)
+    except BenchmarkFixtureError as error:
         _exit_with_error(str(error), 2)
-    typer.echo(
-        json.dumps(
-            {
-                "benchmark": "livesqlbench-base-lite",
-                "evaluator": evaluator.version,
-                "cases": [public_evaluation_dict(evaluation) for evaluation in evaluations],
-                "summary": public_summary(evaluations),
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
+    except BenchmarkAdapterError as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(result)
 
 
 @livesqlbench_app.command("run")
@@ -201,62 +218,70 @@ def run_livesqlbench(
     data_root: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
     dsh_manifest: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
 ) -> None:
-    """Run five Query tasks through DSH and retain redacted session-log evidence."""
+    """Compatibility entry point for Base-Lite DSH execution."""
 
+    adapter = _load_adapter(_LIVE_SQL_BENCH_ADAPTER_ID)
+    suite = _load_benchmark_suite(adapter, data_root)
+    _run_adapter_dsh(adapter, suite, dsh_manifest)
+
+
+def _load_adapter(adapter_id: str) -> BenchmarkAdapter:
+    try:
+        return get_adapter(adapter_id)
+    except BenchmarkAdapterError as error:
+        _exit_with_error(str(error), 64)
+
+
+def _load_benchmark_suite(adapter: BenchmarkAdapter, data_root: Path) -> BenchmarkSuite:
+    try:
+        return adapter.load_suite(data_root)
+    except BenchmarkAdapterError as error:
+        _exit_with_error(str(error), 64)
+
+
+def _load_runner_output(path: Path) -> RunnerOutput:
+    try:
+        return RunnerOutput.model_validate_json(path.read_bytes())
+    except (OSError, ValueError) as error:
+        _exit_with_error(f"invalid runner output: {error}", 64)
+
+
+def _run_adapter_dsh(
+    adapter: BenchmarkAdapter, suite: BenchmarkSuite, dsh_manifest: Path
+) -> None:
     try:
         dsh_resolved = load_manifest(dsh_manifest)
-        outcome = run_base_lite_dsh(
-            data_root,
+        result = adapter.run_dsh(
+            suite,
             dsh_resolved.manifest.environment.dsh,
             dsh_resolved.profile_patch,
             dsh_resolved.manifest.environment.model,
             _runs_root(),
         )
-    except (LiveSQLBenchDataError, LiveSQLBenchRunError, ManifestError) as error:
+    except (BenchmarkAdapterError, ManifestError) as error:
         _exit_with_error(str(error), 64)
+    _echo_run_result(result)
+    if result.exit_code:
+        raise typer.Exit(result.exit_code)
+
+
+def _echo_json(payload: object) -> None:
+    typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _echo_run_result(result: BenchmarkRunResult) -> None:
     typer.echo(
         json.dumps(
             {
-                "run_id": outcome.run.run_id,
-                "status": outcome.attribution.status.value,
-                "attribution": outcome.attribution.kind.value,
-                "report": str(outcome.run.path / "report.md"),
-                "redacted_session_logs": str(outcome.run.path / "raw" / "dsh"),
+                "run_id": result.run_id,
+                "status": result.status,
+                "attribution": result.attribution,
+                "report": str(result.report_path),
+                "redacted_session_logs": str(result.redacted_session_logs_path),
             },
             ensure_ascii=False,
         )
     )
-    if outcome.exit_code:
-        raise typer.Exit(outcome.exit_code)
-
-
-def _load_livesqlbench_suite(data_root: Path) -> LiveSQLBenchSuite:
-    try:
-        return load_base_lite_suite(data_root)
-    except LiveSQLBenchDataError as error:
-        _exit_with_error(str(error), 64)
-
-
-def _load_livesqlbench_runner_output(
-    path: Path, expected_case_ids: tuple[str, ...]
-) -> RunnerOutput:
-    try:
-        output = RunnerOutput.model_validate_json(path.read_bytes())
-    except (OSError, ValueError) as error:
-        _exit_with_error(f"invalid runner output: {error}", 64)
-    actual_case_ids = tuple(case.case_id for case in output.cases)
-    if len(actual_case_ids) != len(set(actual_case_ids)):
-        _exit_with_error("runner output contains duplicate case_id values", 64)
-    if set(actual_case_ids) != set(expected_case_ids):
-        _exit_with_error(
-            "runner output case IDs must exactly match the five configured LiveSQLBench cases",
-            64,
-        )
-    return output
-
-
-def _livesqlbench_evaluator() -> EvaluatorConfig:
-    return EvaluatorConfig(version=_LIVE_SQL_BENCH_EVALUATOR_VERSION)
 
 
 def _runs_root() -> Path:

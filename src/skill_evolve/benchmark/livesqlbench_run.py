@@ -63,9 +63,22 @@ def run_base_lite_dsh(
 ) -> LiveSQLBenchRunOutcome:
     """Run five public tasks serially and score them without persisting GT material."""
 
+    return run_base_lite_dsh_suite(
+        load_base_lite_suite(data_root), dsh_config, profile_patch, model, runs_root
+    )
+
+
+def run_base_lite_dsh_suite(
+    suite: LiveSQLBenchSuite,
+    dsh_config: DshConfig,
+    profile_patch: Path | None,
+    model: ModelConfig,
+    runs_root: Path,
+) -> LiveSQLBenchRunOutcome:
+    """Run one already-validated Base-Lite suite through the existing DSH boundary."""
+
     if dsh_config.runner != "dsh":
         raise LiveSQLBenchRunError("LiveSQLBench automatic runs require dsh.runner: dsh")
-    suite = load_base_lite_suite(data_root)
     environment_fingerprint = _environment_fingerprint(suite, dsh_config, model)
     run = RunStore(runs_root).create()
     _write_initial_run_evidence(run, suite, dsh_config, model, environment_fingerprint)

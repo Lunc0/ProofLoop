@@ -1,0 +1,166 @@
+# 规格：PostgreSQL Benchmark Adapter 框架
+
+## 前提假设
+
+1. 所有 adapter 在本阶段均只支持 PostgreSQL；新增 SQL dialect 必须另行确认。
+2. 每个 benchmark case 使用独立、可销毁的 PostgreSQL fixture 和仅本地的只读查询服务。
+3. Gold SQL、测试用例和官方 dumps 可以保存在本地 Git 忽略的数据目录，但绝不能进入 Agent workspace、DSH prompt、session output 或公开结果。
+4. 本阶段只将现有 LiveSQLBench Base-Lite 迁入框架，作为第一个 adapter；不导入、下载或运行第二个数据集，也不调用真实 DSH 或模型。
+5. 现有 `skill-evolve livesqlbench ...` 命令、run artifact 路径和现有五题的 Soft-EX 语义保持兼容。
+
+## 目标
+
+建立一个受控、显式注册的 PostgreSQL benchmark adapter 框架。未来新增数据集时，开发者只需在仓库中实现
+其 loader、fixture 映射和 evaluator 规则，并在 registry 中登记；数据目录本身不具备执行代码的能力。
+
+目标用户是维护本地 SQL Agent 评测的开发者。成功后，LiveSQLBench 将通过该框架运行，且第二个 PostgreSQL
+benchmark 有稳定、可测试的扩展接口，不需要复制 DSH、GT 隔离、session 证据或 run 报告逻辑。
+
+## 非目标
+
+- 不从 `data/` 自动发现、导入或执行第三方 Python/JavaScript adapter。
+- 不新增 SQL dialect、并发、云存储、生产数据库连接或自动 Skill 修改。
+- 不改变现有 LiveSQLBench 的题目、fixture 数据、Gold SQL、Soft-EX 比较或公开 artifact 脱敏规则。
+- 不在本阶段新增第二个 benchmark 的数据、下载脚本或真实 DSH 运行。
+
+## 命令
+
+现有兼容命令必须继续工作：
+
+```powershell
+uv run skill-evolve livesqlbench validate data/livesqlbench/base-lite
+uv run skill-evolve livesqlbench fixture-check data/livesqlbench/base-lite
+uv run skill-evolve livesqlbench run data/livesqlbench/base-lite examples/sql-agent/experiment.dsh.yaml
+uv run skill-evolve livesqlbench evaluate data/livesqlbench/base-lite <runner-output.json>
+```
+
+新增通用 benchmark 命令：
+
+```powershell
+uv run skill-evolve benchmark validate <adapter-id> <data-root>
+uv run skill-evolve benchmark fixture-check <adapter-id> <data-root>
+uv run skill-evolve benchmark run <adapter-id> <data-root> <dsh-manifest>
+uv run skill-evolve benchmark evaluate <adapter-id> <data-root> <runner-output.json>
+```
+
+质量检查：
+
+```powershell
+uv run ruff check .
+uv run mypy src
+uv run pytest
+```
+
+## 公开合约
+
+新增内部 `BenchmarkAdapter` Protocol，由受信任的仓库代码实现和注册。它的职责为：
+
+1. 加载并校验本地数据 root，形成不可变的 suite/case 对象；
+2. 返回不含 GT 的公开摘要与源文件 digest；
+3. 为单个 case 建立独立 PostgreSQL fixture；
+4. 将 case 转换为不含 Gold SQL 的 `CaseConfig` 与公开 Agent context；
+5. 在本地、私有 GT 上执行该 benchmark 的评分，并序列化去除 GT 的公开结果。
+
+Adapter registry 接受固定的 lowercase adapter ID，例如 `livesqlbench-base-lite`。CLI 只通过 registry
+查找 adapter；未知 ID 必须报错。数据文件只作为不可信输入解析，绝不能指定 import path、shell command、
+database URL 或任意 runner argv。
+
+## 数据边界
+
+每个 adapter 的数据 root 由该 adapter 严格定义，但应按以下概念分层：
+
+```text
+data/<adapter-id>/
+├── public/      # prompt、schema、知识库、字段说明；可复制给 Agent
+├── gt/          # Gold SQL / test cases；只允许本地 evaluator 读取
+└── fixtures/    # 每个 case 所需的 schema、seed 或官方 PostgreSQL dump
+```
+
+Loader 必须验证 public/GT case ID 一一对应、每个引用路径位于 data root 内、fixture 内容可由无特权 PostgreSQL
+容器恢复。GT 仅能进入 adapter 的内存对象；不得进入 `RunInput` 的 Agent 可见字段。
+
+## 执行流程
+
+```text
+CLI adapter-id + data-root
+  → registry lookup
+  → adapter.load_suite(data-root)
+  → adapter.public_summary() + 源文件摘要写入 environment.json
+  → 对每个 case：
+      adapter 打开该 case 的可销毁 PostgreSQL fixture
+      → 创建仅含公开 context 的 DSH workspace
+      → DshRunner 运行并保存成功或失败 session 证据
+      → adapter 使用内存中的 GT 独立评分
+  → 写入公共 evaluation、attribution、result、report
+```
+
+现有 `DshRunner` 继续作为唯一 DSH 子进程边界。它不依赖 adapter 类型，并在 timeout 或非零退出时保留可读取的
+脱敏 session log。
+
+## 项目结构
+
+```text
+src/skill_evolve/benchmark/
+├── contracts.py          # BenchmarkAdapter 与公开 suite/case/run 协议
+├── registry.py           # 固定 adapter 注册表
+├── postgres_runner.py    # 共享的逐题 fixture、DSH、证据与公开结果编排
+├── livesqlbench.py       # LiveSQLBench loader、case 规则、Soft-EX evaluator
+└── livesqlbench_run.py   # 迁移后仅保留兼容 wrapper，或由共享编排替代
+
+tests/
+├── test_benchmark_registry.py
+├── test_benchmark_postgres_runner.py
+└── test_livesqlbench_*.py
+```
+
+`cli.py` 新增 `benchmark` Typer sub-app；现有 `livesqlbench` command 函数通过同一 adapter 调用路径，
+以保持兼容。
+
+## 代码风格
+
+严格 typed Python、frozen dataclass/Pydantic 模型、snake_case 和小型纯函数。数据解析必须先验证，子进程
+始终使用 argv 数组与 `shell=False`。
+
+```python
+class BenchmarkAdapter(Protocol):
+    adapter_id: str
+
+    def load_suite(self, data_root: Path) -> BenchmarkSuite: ...
+
+    def public_summary(self, suite: BenchmarkSuite) -> dict[str, object]: ...
+
+    def evaluate_case(
+        self, case: BenchmarkCase, runner_case: RunnerCaseOutput, fixture: QueryExecutor
+    ) -> CaseEvaluation: ...
+```
+
+`BenchmarkCase` 中的私有 GT 字段不得经由 `RunnerCaseOutput`、`RunInput` 或 public serializer 传递。
+
+## 测试策略
+
+- Registry：已知 adapter 可解析；未知、格式错误 ID 被拒绝。
+- Loader：缺失文件、重复 case ID、GT/public 不匹配、路径逃逸、非法 fixture 引用均失败。
+- Isolation：断言 Gold SQL 不存在于 Agent workspace、DSH job、runner output、trajectory、evaluation、result 或 report。
+- Shared runner：每 case 使用独立 fixture；通过、无 SQL、危险 SQL、timeout、DSH 非零退出和 session capture failure 都保留正确证据与 verdict。
+- Compatibility：现有五题 import、fixture、CLI、run 测试保持通过；旧 `livesqlbench` CLI 输出保持可解析。
+- Full verification：执行 ruff、mypy 和完整 pytest；不执行真实 DSH 或模型。
+
+## 边界
+
+- 始终：验证所有 adapter/data 输入；使用本地可销毁 PostgreSQL；只给 Agent 只读能力；保存脱敏证据；提交前运行质量检查。
+- 先询问：新增 SQL dialect、第二个数据集的授权/GT 保管策略、数据库 schema 迁移、依赖或 CI 改动、真实 DSH/模型运行。
+- 绝不：将 GT、凭据、生产数据库 URL 或未脱敏 session 提交到 Git；从 data 中动态 import/执行代码；用 privileged role 执行候选 SQL。
+
+## 成功标准
+
+1. `livesqlbench-base-lite` 在 registry 中显式注册，且通用 `benchmark` CLI 可执行其 validate、fixture-check、run、evaluate 流程。
+2. 原有 `livesqlbench` CLI 作为兼容入口，输出与失败 exit-code 语义保持一致。
+3. LiveSQLBench 五题仍逐题独立 fixture，Gold SQL 不出现在任何 Agent 可见或公开 artifact 中。
+4. Adapter contract 足以让第二个 PostgreSQL benchmark 以仓库内代码实现 loader、fixture mapping 与 evaluator，而无需改动 DSH runner。
+5. 所有现有测试和新增 registry/隔离/兼容测试通过；不运行真实 DSH 或模型。
+
+## 待定问题
+
+1. 第二个数据集的名称、授权方式及 GT 是否允许在本机 `data/` 保存，尚未指定。
+2. 第二个数据集是否需要 LiveSQLBench Soft-EX 以外的结果比较规则，尚未指定。
+3. 已决定：新通用 CLI 现在公开，首个注册 adapter 为 `livesqlbench-base-lite`。

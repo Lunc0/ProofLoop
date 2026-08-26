@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from skill_evolve.benchmark.contracts import JsonObject, JsonValue
 from skill_evolve.evaluator.core import CaseEvaluation, QueryExecutor, Verdict
 from skill_evolve.runner.contracts import RunnerCaseOutput
 from skill_evolve.sql.postgres import QueryResult
@@ -68,14 +69,23 @@ class LiveSQLBenchSuite:
     cases: tuple[LiveSQLBenchCase, ...]
 
     @property
+    def adapter_id(self) -> str:
+        """Return the fixed, registry-owned adapter identity."""
+
+        return "livesqlbench-base-lite"
+
+    @property
     def case_ids(self) -> tuple[str, ...]:
         """Return the fixed suite order used to bind runner output safely."""
 
         return tuple(case.instance_id for case in self.cases)
 
-    def public_summary(self) -> dict[str, Any]:
+    def public_summary(self) -> JsonObject:
         """Return machine-readable metadata that intentionally excludes gold SQL."""
 
+        source_digests: dict[str, JsonValue] = {
+            path: digest for path, digest in self.source_digests().items()
+        }
         return {
             "benchmark": "livesqlbench-base-lite",
             "case_count": len(self.cases),
@@ -92,7 +102,7 @@ class LiveSQLBenchSuite:
                 }
                 for case in self.cases
             ],
-            "source_digests": self.source_digests(),
+            "source_digests": source_digests,
         }
 
     def source_digests(self) -> dict[str, str]:
@@ -101,9 +111,21 @@ class LiveSQLBenchSuite:
         paths: list[Path] = [self.public_data_file, self.gt_file]
         for case in self.cases:
             paths.extend(case.public_context_files)
-            dump_directory = self.dump_root / f"{case.database_name}_template"
-            paths.extend(sorted(dump_directory.glob("*.sql")))
-            paths.append(self.dump_root / f"{case.database_name}_table_orders.txt")
+            dump_directory = _path_within_root(
+                self.data_root, self.dump_root / f"{case.database_name}_template"
+            )
+            paths.extend(
+                sorted(
+                    _path_within_root(self.data_root, path)
+                    for path in dump_directory.glob("*.sql")
+                )
+            )
+            paths.append(
+                _path_within_root(
+                    self.data_root,
+                    self.dump_root / f"{case.database_name}_table_orders.txt",
+                )
+            )
         return {
             path.relative_to(self.data_root).as_posix(): _sha256_file(path)
             for path in sorted(set(paths))
@@ -113,15 +135,21 @@ class LiveSQLBenchSuite:
 def load_base_lite_suite(data_root: Path) -> LiveSQLBenchSuite:
     """Load and strictly validate the approved Base-Lite Query-only smoke suite."""
 
-    root = data_root.resolve(strict=True)
-    public_data_file = root / "public" / "livesqlbench_data.jsonl"
-    gt_file = _single_jsonl_file(root / "gt", "GT")
-    dump_root = root / "dumps" / "base-lite" / "livesqlbench-base-lite-dumps"
+    try:
+        root = data_root.resolve(strict=True)
+    except OSError as error:
+        raise LiveSQLBenchDataError(f"could not resolve data root {data_root}: {error}") from error
+    public_data_file = _path_within_root(root, root / "public" / "livesqlbench_data.jsonl")
+    gt_file = _single_jsonl_file(_path_within_root(root, root / "gt"), "GT", root)
+    dump_root = _path_within_root(
+        root, root / "dumps" / "base-lite" / "livesqlbench-base-lite-dumps"
+    )
     _require_file(public_data_file, "public data JSONL")
     _require_directory(dump_root, "extracted dump root")
 
     public_records = _records_by_id(_read_jsonl(public_data_file), "public data")
     gt_records = _records_by_id(_read_jsonl(gt_file), "GT data")
+    _require_matching_case_ids(public_records, gt_records)
     cases = tuple(
         _build_case(root, instance_id, public_records, gt_records, dump_root)
         for instance_id in APPROVED_BASE_LITE_QUERY_IDS
@@ -236,20 +264,26 @@ def _build_case(
     if not isinstance(conditions, Mapping) or not isinstance(conditions.get("order"), bool):
         raise LiveSQLBenchDataError(f"public conditions are invalid for {instance_id!r}")
     difficulty = _required_string(public_record, "difficulty_tier", instance_id)
-    public_directory = root / "public" / database_name
-    schema_file = public_directory / f"{database_name}_schema.txt"
-    knowledge_file = public_directory / f"{database_name}_kb.jsonl"
-    column_meaning_file = public_directory / f"{database_name}_column_meaning_base.json"
+    public_directory = _path_within_root(root, root / "public" / database_name)
+    schema_file = _path_within_root(root, public_directory / f"{database_name}_schema.txt")
+    knowledge_file = _path_within_root(root, public_directory / f"{database_name}_kb.jsonl")
+    column_meaning_file = _path_within_root(
+        root, public_directory / f"{database_name}_column_meaning_base.json"
+    )
+    table_order_file = _path_within_root(
+        root, dump_root / f"{database_name}_table_orders.txt"
+    )
     for file_path, label in (
         (schema_file, "schema"),
         (knowledge_file, "knowledge base"),
         (column_meaning_file, "column meanings"),
-        (dump_root / f"{database_name}_table_orders.txt", "table order"),
+        (table_order_file, "table order"),
     ):
         _require_file(file_path, f"{label} for {instance_id}")
-    dump_directory = dump_root / f"{database_name}_template"
+    dump_directory = _path_within_root(root, dump_root / f"{database_name}_template")
     _require_directory(dump_directory, f"dump directory for {instance_id}")
-    if not any(dump_directory.glob("*.sql")):
+    dump_files = tuple(_path_within_root(root, path) for path in dump_directory.glob("*.sql"))
+    if not dump_files:
         raise LiveSQLBenchDataError(f"dump directory has no SQL files for {instance_id!r}")
     return LiveSQLBenchCase(
         instance_id=instance_id,
@@ -300,14 +334,40 @@ def _records_by_id(
     return result
 
 
-def _single_jsonl_file(directory: Path, label: str) -> Path:
+def _single_jsonl_file(directory: Path, label: str, root: Path) -> Path:
     _require_directory(directory, f"{label} directory")
-    candidates = sorted(path for path in directory.glob("*.jsonl") if path.is_file())
+    candidates = sorted(
+        _path_within_root(root, path) for path in directory.glob("*.jsonl") if path.is_file()
+    )
     if len(candidates) != 1:
         raise LiveSQLBenchDataError(
             f"{label} directory must contain exactly one JSONL file, found {len(candidates)}"
         )
     return candidates[0]
+
+
+def _require_matching_case_ids(
+    public_records: Mapping[str, Mapping[str, Any]], gt_records: Mapping[str, Mapping[str, Any]]
+) -> None:
+    public_ids = set(public_records)
+    gt_ids = set(gt_records)
+    if public_ids == gt_ids:
+        return
+    raise LiveSQLBenchDataError("public and GT case IDs must match exactly")
+
+
+def _path_within_root(root: Path, path: Path) -> Path:
+    """Reject path traversal and symlink escapes in untrusted data roots."""
+
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise LiveSQLBenchDataError(f"could not resolve required path {path}: {error}") from error
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise LiveSQLBenchDataError(f"required path escapes data root: {path}") from error
+    return resolved
 
 
 def _required_identifier(record: Mapping[str, Any], field: str, instance_id: str) -> str:

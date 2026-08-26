@@ -62,6 +62,19 @@ def test_rejects_a_non_query_approved_case(tmp_path: Path) -> None:
         load_base_lite_suite(data_root)
 
 
+def test_rejects_public_and_gt_case_id_mismatch(tmp_path: Path) -> None:
+    data_root = _write_base_lite_fixture(tmp_path)
+    gt_file = data_root / "gt" / "official_gt.jsonl"
+    records = [json.loads(line) for line in gt_file.read_text(encoding="utf-8").splitlines()]
+    records[-1]["instance_id"] = "different_case"
+    gt_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(LiveSQLBenchDataError, match="case IDs must match exactly"):
+        load_base_lite_suite(data_root)
+
+
 def test_soft_ex_removes_comments_distinct_and_round_without_public_gold_leak(
     tmp_path: Path,
 ) -> None:
