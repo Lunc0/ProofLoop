@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 dist/
 runs/
+data/livesqlbench/
 *.py[cod]
 .env
 .env.*

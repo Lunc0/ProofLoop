@@ -168,9 +168,13 @@ def test_dsh_runner_uses_session_log_as_authoritative_evidence(monkeypatch, tmp_
     monkeypatch.setattr("skill_evolve.runner.dsh.subprocess.run", fake_run)
     monkeypatch.setattr("skill_evolve.runner.dsh.snapshot_session_logs", lambda root: {})
     monkeypatch.setattr(
-        "skill_evolve.runner.dsh.find_new_session_log", lambda before, root: session_path
+        "skill_evolve.runner.dsh.find_changed_session_logs", lambda before, root: (session_path,)
     )
     monkeypatch.setattr("skill_evolve.runner.dsh.load_session_log", lambda path: loaded_log)
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh._session_log_for_workspace",
+        lambda candidates, workspace: (session_path, loaded_log),
+    )
     monkeypatch.setattr("skill_evolve.runner.dsh.normalise_session_log", lambda log: evidence)
 
     execution = DshRunner(config, None).run(_run_input(tmp_path))

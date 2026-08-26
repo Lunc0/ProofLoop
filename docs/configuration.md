@@ -41,3 +41,30 @@ SQL policy 和 cases 仍必须固定在 manifest，不能由 `.env` 覆盖。
    ```
 
 运行产生的 `manifest.resolved.yaml` 会保存解析后的非敏感 binary，但永远不会保存 `.env` 中的凭据。
+
+## LiveSQLBench Base-Lite 本地数据
+
+五题 Query benchmark 使用下列 Git 忽略的目录，不能放在普通 experiment manifest、runner workspace
+或 `runs/` 中：
+
+| 目录 | 内容 | 可见性 |
+|---|---|---|
+| `data/livesqlbench/base-lite/public/` | 官方公开题目、schema、HKB、字段说明 | Agent 可使用 |
+| `data/livesqlbench/base-lite/gt/` | 获授权的 `sol_sql`、知识映射、Test Cases | 仅本地 evaluator |
+| `data/livesqlbench/base-lite/dumps/` | 官方 PostgreSQL table dumps | 仅本地 fixture |
+
+校验、恢复与离线评分依次为：
+
+```powershell
+uv run skill-evolve livesqlbench validate data/livesqlbench/base-lite
+uv run skill-evolve livesqlbench fixture-check data/livesqlbench/base-lite
+uv run skill-evolve livesqlbench run data/livesqlbench/base-lite examples/sql-agent/experiment.dsh.yaml
+uv run skill-evolve livesqlbench evaluate data/livesqlbench/base-lite <runner-output.json>
+```
+
+`fixture-check` 和 `evaluate` 需要 Docker Desktop 与本地 `postgres:14.12` 镜像。若数据或 dump 缺失、GT
+不匹配，命令会失败并不产生评测产物。测试用例内的任意 Python 不会被执行。
+
+自动 `run` 是串行的：每题在新的 disposable PostgreSQL 14.12 容器中运行，DSH 只获得该题的公开
+schema、HKB/字段说明和本地只读查询能力。每题结束后，来自 DSH session-log root 的日志会先脱敏，再保存
+为 `runs/<run-id>/raw/dsh/<题目>.session.jsonl`；GT 不会进入 DSH workspace、runner output 或评测报告。

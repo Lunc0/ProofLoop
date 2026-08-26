@@ -118,13 +118,21 @@ def find_new_session_log(
 ) -> Path:
     """Require exactly one new or changed log because DSH runs are serial."""
 
-    after = snapshot_session_logs(root)
-    changed = [path for path, signature in after.items() if before.get(path) != signature]
+    changed = find_changed_session_logs(before, root)
     if len(changed) != 1:
         raise DshSessionLogError(
             f"expected exactly one changed DSH session log, found {len(changed)}"
         )
     return changed[0]
+
+
+def find_changed_session_logs(
+    before: dict[Path, SessionLogSignature], root: Path
+) -> tuple[Path, ...]:
+    """Return every changed log so callers can bind evidence to a task workspace."""
+
+    after = snapshot_session_logs(root)
+    return tuple(path for path, signature in after.items() if before.get(path) != signature)
 
 
 def load_session_log(path: Path, node_binary: str = "node") -> LoadedDshSessionLog:

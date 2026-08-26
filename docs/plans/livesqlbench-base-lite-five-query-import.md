@@ -1,0 +1,177 @@
+# Implementation Plan: LiveSQLBench Base-Lite 五题 Query 导入
+
+## Overview
+
+在不改变现有 SQL 方言、并发策略或自动 Skill 修改边界的前提下，加入一个
+LiveSQLBench Base-Lite adapter。它只接受五个批准的 `Query` instance，将官方公开材料与私有 GT
+在内存中按 `instance_id` 合并；每次 case 以独立、可销毁的 PostgreSQL fixture 恢复对应的表 dump，
+Agent 仅能读取公开任务上下文和 fixture，评估器才读取 gold SQL。
+
+## Architecture Decisions
+
+- 公开数据、GT、dumps 始终留在 `data/livesqlbench/base-lite/` 并由 Git 忽略；运行目录与 Agent
+  workspace 只保留允许暴露的材料和摘要，不复制 gold SQL。
+- 使用官方 table-dump 目录恢复 PostgreSQL；每个官方 dump 保持其 `public` schema，恢复到同一个临时
+  PostgreSQL 实例中的独立数据库。case 通过仅拥有该数据库 `CONNECT` 与 `SELECT` 权限的角色访问它。
+- 新增 benchmark 专用 manifest/config，而不把 gold SQL 填进现有 `CaseConfig.expected_query`。现有
+  普通实验 manifest 与测试维持兼容。
+- 初版只实现 Query 的 Soft-EX 所需 `conditions.order` 与小数结果预处理；官方 test-case Python
+  不执行，Management/CRUD 不导入。
+
+## Task List
+
+### Phase 1: 可验证的数据导入
+
+#### Task 1: 拉取并验证公开 Base-Lite 数据
+
+**Description:** 将官方 Hugging Face 公开数据拉入 Git 忽略目录，并记录可复查的提交版本与内容
+摘要；确认五题的 prompt、schema、KB 和字段释义均存在。
+
+**Acceptance criteria:**
+
+- [ ] `public/` 包含官方 `livesqlbench_data.jsonl` 与五个数据库的公开材料。
+- [ ] 公开 JSONL 与私有 GT 中的五个 instance ID 一一对应，且 category 为 Query。
+- [ ] 缺少任何输入时显示明确错误，不尝试伪造 gold 或 context。
+
+**Verification:** 新增 importer 单元测试；`uv run pytest tests/test_livesqlbench_import.py`。
+
+**Dependencies:** None.
+
+**Files likely touched:**
+
+- `src/skill_evolve/benchmark/livesqlbench.py`
+- `src/skill_evolve/benchmark/__init__.py`
+- `tests/test_livesqlbench_import.py`
+- `docs/configuration.md`
+
+**Estimated scope:** Medium.
+
+#### Task 2: 建立无 GT 泄漏的 benchmark 配置模型
+
+**Description:** 定义只记录数据根目录、五个允许 ID、公开 context 路径和数据库标识的配置；GT path
+只作为本地 evaluator input，不能序列化进 resolved manifest、agent workspace 或报告。
+
+**Acceptance criteria:**
+
+- [ ] 配置拒绝非批准 ID、Management 任务、重复任务和路径逃逸。
+- [ ] 环境指纹包含公开数据、GT 和 dumps 的内容 digest，但不会记录其绝对路径或 SQL 内容。
+- [ ] 现有 experiment manifest 行为与指纹测试不变。
+
+**Verification:** 新增配置/指纹测试；`uv run pytest tests/test_livesqlbench_import.py tests/test_config_and_fingerprint.py`。
+
+**Dependencies:** Task 1.
+
+**Files likely touched:**
+
+- `src/skill_evolve/config/models.py`
+- `src/skill_evolve/config/loader.py`
+- `src/skill_evolve/fingerprint/snapshot.py`
+- `src/skill_evolve/benchmark/livesqlbench.py`
+- `tests/test_livesqlbench_import.py`
+
+**Estimated scope:** Medium.
+
+### Checkpoint: Data contract
+
+- [ ] 五题与 GT/公开材料可确定性匹配。
+- [ ] GT 不出现在任何 agent-visible 或版本控制文件中。
+- [ ] `uv run ruff check .`、`uv run mypy src` 和非 Docker 测试通过。
+
+### Phase 2: 可销毁数据库 fixture
+
+#### Task 3: 实现 table-dump PostgreSQL fixture
+
+**Description:** 在 disposable PostgreSQL 容器中，将五个数据库的官方 `.sql` table dumps 恢复进
+独立数据库；创建仅有该数据库 `CONNECT` 和 `SELECT` 权限的 reader role。
+
+**Acceptance criteria:**
+
+- [ ] dumps 缺失、空目录、非 `.sql` 文件或 restore 失败会 fail closed。
+- [ ] 执行 dump SQL 只发生在容器内；主机不执行 dump 内容，Agent 无 Docker/数据库凭据。
+- [ ] reader 不可连接其他 benchmark 数据库或执行写语句；每个 case 只能访问它的数据库。
+
+**Verification:** 合成 table dumps 的 Docker integration test；`uv run pytest tests/test_livesqlbench_fixture.py`。
+
+**Dependencies:** Task 2.
+
+**Files likely touched:**
+
+- `src/skill_evolve/sql/livesqlbench.py`
+- `src/skill_evolve/sql/postgres.py`
+- `src/skill_evolve/benchmark/livesqlbench.py`
+- `tests/test_livesqlbench_fixture.py`
+- `tests/conftest.py`
+
+**Estimated scope:** Medium.
+
+#### Task 4: 将 benchmark executor 接入受控 runner 与 evaluator
+
+**Description:** 为选中 case 创建仅含公开 schema/HKB/context 的 task workspace，并在探索和评分阶段
+分别创建 fresh fixture；gold SQL 仅在 evaluator 内存中使用。为 Query 题加入顺序与小数条件兼容。
+
+**Acceptance criteria:**
+
+- [ ] fake runner 通过五题路径时可以被客观评分；agent workspace 不包含 gold 字段。
+- [ ] `conditions.order` 和 decimal 规则生效；普通 evaluator 测试保持原语义。
+- [ ] fixture/GT 无效时 run 暂停并归因 `eval_data`，不生成 Skill 改进建议。
+
+**Verification:** fake-runner end-to-end tests 与 Docker fixture test；`uv run pytest tests/test_livesqlbench_*.py tests/test_workflow.py`。
+
+**Dependencies:** Task 3.
+
+**Files likely touched:**
+
+- `src/skill_evolve/workflow.py`
+- `src/skill_evolve/evaluator/core.py`
+- `src/skill_evolve/runner/dsh.py`
+- `src/skill_evolve/benchmark/livesqlbench.py`
+- `tests/test_livesqlbench_workflow.py`
+
+**Estimated scope:** Medium.
+
+### Checkpoint: Local evaluation
+
+- [ ] 五个 database 可恢复、隔离和查询。
+- [ ] fake-runner 能跑完整五题 `fast` suite，且证据没有泄漏 gold。
+- [ ] 所有项目检查通过。
+
+### Phase 3: CLI 与操作文档
+
+#### Task 5: 提供安全 CLI 和五题示例
+
+**Description:** 添加显式的本地 benchmark validate/run 命令，以及不包含 GT 的示例配置和操作文档。
+真实 DSH 仍由用户显式运行，避免默认消耗 API 额度。
+
+**Acceptance criteria:**
+
+- [ ] `--help` 解释所需的 public/gt/dumps 目录，并在缺失 dumps 时退出但不修改数据。
+- [ ] 示例只指向 Git 忽略的数据根目录，未提交任何 benchmark 数据或答案。
+- [ ] README 说明五题、完整性检查与首次真实运行前置条件。
+
+**Verification:** CLI dry-run test；`uv run skill-evolve --help`、`uv run pytest`、`uv run ruff check .`、`uv run mypy src`。
+
+**Dependencies:** Task 4.
+
+**Files likely touched:**
+
+- `src/skill_evolve/cli.py`
+- `src/skill_evolve/benchmark/livesqlbench.py`
+- `tests/test_livesqlbench_cli.py`
+- `README.md`
+- `docs/configuration.md`
+
+**Estimated scope:** Medium.
+
+## Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| 官方 dumps 尚未在本机 | 高 | 前置验证 fail closed；可以完成数据 adapter 测试，但不做真实恢复。 |
+| 官方 dump SQL 与 PostgreSQL 版本不兼容 | 高 | 按上游 Base-Lite 的 PostgreSQL 14.12 环境测试，并固定 image digest。 |
+| GT 泄漏至 workspace 或 run artifacts | 高 | benchmark 专用配置不序列化 gold；端到端测试扫描输出目录。 |
+| Soft-EX 与官方有差异 | 中 | 初版标注为本地 Query 回归分数；将来以官方 evaluator Docker 复核。 |
+
+## Open Questions
+
+- None. The approved defaults are: official dumps, all five cases in `fast`, and both data import
+  and runtime fixture support.

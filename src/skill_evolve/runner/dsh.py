@@ -22,7 +22,8 @@ from skill_evolve.runner.contracts import (
 )
 from skill_evolve.runner.dsh_session import (
     DshSessionLogError,
-    find_new_session_log,
+    LoadedDshSessionLog,
+    find_changed_session_logs,
     load_session_log,
     normalise_session_log,
     snapshot_session_logs,
@@ -135,10 +136,12 @@ class DshRunner:
 
         if session_before is not None:
             try:
-                session_path = find_new_session_log(
-                    session_before, Path(self._config.session_log_root or "")
+                session_path, session_log = _session_log_for_workspace(
+                    find_changed_session_logs(
+                        session_before, Path(self._config.session_log_root or "")
+                    ),
+                    workspace,
                 )
-                session_log = load_session_log(session_path)
                 artifacts = (
                     *artifacts,
                     RawArtifact(
@@ -312,6 +315,32 @@ $response = Invoke-RestMethod -Uri '{query_endpoint}' -Method Post `
 $response | ConvertTo-Json -Depth 16
 """
     (workspace / "sql-readonly.ps1").write_text(script, encoding="utf-8")
+
+
+def _session_log_for_workspace(
+    candidates: tuple[Path, ...], workspace: Path
+) -> tuple[Path, LoadedDshSessionLog]:
+    matches: list[tuple[Path, LoadedDshSessionLog]] = []
+    expected_workspace = workspace.resolve()
+    for path in candidates:
+        session_log = load_session_log(path)
+        if _session_log_workspace(session_log) == expected_workspace:
+            matches.append((path, session_log))
+    if len(matches) != 1:
+        raise DshSessionLogError(
+            "expected exactly one changed DSH session log for workspace "
+            f"{workspace}, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def _session_log_workspace(session_log: LoadedDshSessionLog) -> Path | None:
+    if not session_log.events:
+        return None
+    workspace = session_log.events[0].get("cwd")
+    if not isinstance(workspace, str) or not workspace:
+        return None
+    return Path(workspace).resolve()
 
 
 def _dsh_command_prefix(binary: str) -> list[str]:

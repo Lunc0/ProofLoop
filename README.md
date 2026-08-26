@@ -74,3 +74,39 @@ uv run pytest
 ```
 
 See [the v0.1 technical design](docs/design/v0.1-workflow-shell.md) for contracts, safety boundaries and deferred scope.
+
+## LiveSQLBench Base-Lite（本地五题 Query）
+
+本项目已接入固定的 `fast` 题集：`alien_2`、`polar_10`、`gaming_1`、`archeology_5`、`cross_db_8`。
+数据必须保留在已被 Git 忽略的 `data/livesqlbench/base-lite/`：公开 Base-Lite 材料在 `public/`，获授权
+的 GT/Test Cases JSONL 在 `gt/`，官方 PostgreSQL dumps 在 `dumps/`。不要把其中任何内容提交到仓库。
+
+首次恢复官方 dump 使用其上游 PostgreSQL 版本：
+
+```powershell
+docker pull postgres:14.12
+uv run skill-evolve livesqlbench validate data/livesqlbench/base-lite
+uv run skill-evolve livesqlbench fixture-check data/livesqlbench/base-lite
+```
+
+`fixture-check` 会创建并删除一个本地容器；五个官方数据库分别恢复为容器内独立数据库，每题 reader
+只能连接自己的数据库并且只有 `SELECT` 权限。它不会调用 DSH 或模型。
+
+用已配置的真实 DSH 自动顺序运行五题、保存脱敏 session log 并评分：
+
+```powershell
+uv run skill-evolve livesqlbench run data/livesqlbench/base-lite examples/sql-agent/experiment.dsh.yaml
+```
+
+DSH manifest 只提供非敏感的 DSH runtime 与模型标识；benchmark 不会读取其中的 cases 或 expected SQL。
+每题的脱敏 session log 位于输出 run 目录的 `raw/dsh/<题目>.session.jsonl`。
+
+已有 harness 产出的 `RunnerOutput` JSON 可用本地 Soft-EX 评分：
+
+```powershell
+uv run skill-evolve livesqlbench evaluate data/livesqlbench/base-lite <runner-output.json>
+```
+
+该命令的 stdout 不包含 gold SQL、GT test cases 或 gold 查询结果；其评分实现了这五个 Query 题的
+`conditions.order` 与官方 Soft-EX 的注释/DISTINCT/ROUND 和两位小数预处理兼容。它是本地回归分数，
+不是官方 leaderboard 提交。
