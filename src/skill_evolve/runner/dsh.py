@@ -7,9 +7,11 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -36,17 +38,28 @@ from skill_evolve.runner.dsh_session import (
 from skill_evolve.runner.redaction import redact_text
 
 _SQL_BLOCK_PATTERN = re.compile(r"```(?:sql|postgresql)\s*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
+_CREDENTIAL_FIELD_PATTERN = re.compile(
+    r"(?:api[_-]?key|access[_-]?token|token|secret|password|authorization)$", re.IGNORECASE
+)
+_ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
 class DshModelSelection:
-    """Non-secret, run-scoped DSH settings used to select the requested model."""
+    """Run-scoped selection and short-lived provider settings for one DSH invocation."""
 
     model: ModelConfig
-    settings_path: Path
     patch_path: Path
-    settings_content: bytes
+    selection_content: bytes
     patch_content: bytes
+    temporary_directory: tempfile.TemporaryDirectory[str]
+
+    def cleanup(self) -> None:
+        self.temporary_directory.cleanup()
+
+
+class DshModelSettingsError(ValueError):
+    """DSH user settings cannot safely supply a provider configuration."""
 
 
 class DshRunner:
@@ -67,27 +80,30 @@ class DshRunner:
     def run(self, input: RunInput) -> RunnerExecution:
         try:
             model_selection = _prepare_model_selection(input, self._model)
-        except OSError as error:
+        except (DshModelSettingsError, OSError, yaml.YAMLError) as error:
             raise RunnerError(
                 f"could not prepare DSH model selection: {error.__class__.__name__}"
             ) from error
-        case_outputs: list[RunnerCaseOutput] = []
-        raw_artifacts: list[RawArtifact] = []
-        stderr_parts: list[str] = []
-        for case in input.cases:
-            output, artifacts, stderr = self._run_case(case, input, model_selection)
-            case_outputs.append(output)
-            raw_artifacts.extend(artifacts)
-            if stderr:
-                stderr_parts.append(f"[{case.id}]\n{stderr}")
+        try:
+            case_outputs: list[RunnerCaseOutput] = []
+            raw_artifacts: list[RawArtifact] = []
+            stderr_parts: list[str] = []
+            for case in input.cases:
+                output, artifacts, stderr = self._run_case(case, input, model_selection)
+                case_outputs.append(output)
+                raw_artifacts.extend(artifacts)
+                if stderr:
+                    stderr_parts.append(f"[{case.id}]\n{stderr}")
 
-        runner_output = RunnerOutput(schema_version="v1", cases=tuple(case_outputs))
-        return RunnerExecution(
-            output=runner_output,
-            raw_output=(runner_output.model_dump_json(indent=2) + "\n").encode("utf-8"),
-            stderr="\n\n".join(stderr_parts),
-            raw_artifacts=tuple(raw_artifacts),
-        )
+            runner_output = RunnerOutput(schema_version="v1", cases=tuple(case_outputs))
+            return RunnerExecution(
+                output=runner_output,
+                raw_output=(runner_output.model_dump_json(indent=2) + "\n").encode("utf-8"),
+                stderr="\n\n".join(stderr_parts),
+                raw_artifacts=tuple(raw_artifacts),
+            )
+        finally:
+            model_selection.cleanup()
 
     def _run_case(
         self, case: CaseConfig, input: RunInput, model_selection: DshModelSelection
@@ -388,20 +404,59 @@ def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
 
 
 def _prepare_model_selection(input: RunInput, model: ModelConfig) -> DshModelSelection:
-    """Create the final DSH settings overlay without touching user settings or credentials.
-
-    DSH's ``agent-default-model`` settings namespace takes precedence over the
-    profile composition, so a user's interactive default would otherwise change
-    a manifest-declared benchmark model. The final overlay redirects only the
-    settings provider to a run-scoped document; the credentials provider keeps
-    its normal DSH-home location.
-    """
+    """Create a model lock while retaining non-secret DSH provider route settings."""
 
     runtime_directory = _dsh_runtime_directory(input)
     runtime_directory.mkdir(parents=True, exist_ok=True)
-    settings_path = runtime_directory / "model-selection.yaml"
+    selection_path = runtime_directory / "model-selection.yaml"
     patch_path = runtime_directory / "model-selection.patch.yml"
-    settings_content = yaml.safe_dump(
+    selection_content = _model_selection_content(model)
+    selection_path.write_bytes(selection_content)
+    temporary_directory = tempfile.TemporaryDirectory(prefix="skill-evolve-dsh-settings-")
+    try:
+        settings_path = Path(temporary_directory.name) / "settings.yaml"
+        settings_path.write_text(
+            yaml.safe_dump(
+                {
+                    **_provider_settings_from(_dsh_settings_path()),
+                    "agent-default-model": {
+                        "provider": model.provider,
+                        "model": model.name,
+                    },
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        patch_content = yaml.safe_dump(
+            [
+                {
+                    "id": "settings",
+                    "config": {
+                        "path": str(settings_path),
+                        "watch": False,
+                    },
+                }
+            ],
+            allow_unicode=True,
+            sort_keys=False,
+        ).encode("utf-8")
+        patch_path.write_bytes(patch_content)
+        return DshModelSelection(
+            model=model,
+            patch_path=patch_path,
+            selection_content=selection_content,
+            patch_content=patch_content,
+            temporary_directory=temporary_directory,
+        )
+    except Exception:
+        temporary_directory.cleanup()
+        raise
+
+
+def _model_selection_content(model: ModelConfig) -> bytes:
+    return yaml.safe_dump(
         {
             "agent-default-model": {
                 "provider": model.provider,
@@ -411,28 +466,52 @@ def _prepare_model_selection(input: RunInput, model: ModelConfig) -> DshModelSel
         allow_unicode=True,
         sort_keys=False,
     ).encode("utf-8")
-    patch_content = yaml.safe_dump(
-        [
-            {
-                "id": "settings",
-                "config": {
-                    "path": str(settings_path),
-                    "watch": False,
-                },
-            }
-        ],
-        allow_unicode=True,
-        sort_keys=False,
-    ).encode("utf-8")
-    settings_path.write_bytes(settings_content)
-    patch_path.write_bytes(patch_content)
-    return DshModelSelection(
-        model=model,
-        settings_path=settings_path,
-        patch_path=patch_path,
-        settings_content=settings_content,
-        patch_content=patch_content,
-    )
+
+
+def _provider_settings_from(settings_path: Path) -> dict[str, Any]:
+    if not settings_path.is_file():
+        return {}
+    parsed = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise DshModelSettingsError("DSH settings root must be a mapping")
+    provider_settings: dict[str, Any] = {}
+    for namespace, value in parsed.items():
+        if not isinstance(namespace, str) or not namespace.startswith("llm-"):
+            continue
+        _validate_provider_settings(value, (namespace,))
+        provider_settings[namespace] = value
+    return provider_settings
+
+
+def _validate_provider_settings(value: Any, path: tuple[str, ...]) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise DshModelSettingsError("DSH provider settings keys must be strings")
+            child_path = (*path, key)
+            normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+            if normalized_key == "apikeyenv":
+                if not isinstance(child, str) or not _ENVIRONMENT_VARIABLE_PATTERN.fullmatch(child):
+                    raise DshModelSettingsError(
+                        "DSH provider setting "
+                        f"{'.'.join(child_path)} must be an environment variable name"
+                    )
+                continue
+            if _CREDENTIAL_FIELD_PATTERN.search(key):
+                raise DshModelSettingsError(
+                    f"DSH provider setting {'.'.join(child_path)} must not contain a credential"
+                )
+            _validate_provider_settings(child, child_path)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _validate_provider_settings(child, (*path, str(index)))
+
+
+def _dsh_settings_path() -> Path:
+    dsh_home = os.environ.get("DSH_HOME")
+    return Path(dsh_home) / "settings.yaml" if dsh_home else Path.home() / ".dsh" / "settings.yaml"
 
 
 def _dsh_runtime_directory(input: RunInput) -> Path:
@@ -568,7 +647,7 @@ def _case_artifacts(
         ),
         RawArtifact(
             relative_path=f"dsh/{case_id}.model-selection.yaml",
-            content=model_selection.settings_content,
+            content=model_selection.selection_content,
         ),
         RawArtifact(
             relative_path=f"dsh/{case_id}.model-selection.patch.yml",

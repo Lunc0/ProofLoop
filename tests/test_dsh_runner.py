@@ -18,6 +18,7 @@ from skill_evolve.config.models import CaseConfig, DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     ReadOnlyDatabaseAccess,
     RunInput,
+    RunnerError,
     TrajectoryEvent,
     Usage,
 )
@@ -65,6 +66,13 @@ def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
     def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["command"] = command
         captured["kwargs"] = kwargs
+        patch_indices = [index for index, value in enumerate(command) if value == "--patch"]
+        selection_patch_path = Path(command[patch_indices[-1] + 1])
+        selection_patch = yaml.safe_load(selection_patch_path.read_text(encoding="utf-8"))
+        settings_path = Path(selection_patch[0]["config"]["path"])
+        captured["selection_patch"] = selection_patch
+        captured["settings_path"] = settings_path
+        captured["effective_settings"] = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
         return subprocess.CompletedProcess(
             command,
             0,
@@ -104,16 +112,17 @@ def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
         "name": "deepseek-v4-flash",
     }
     selection_patch_path = Path(captured["command"][profile_index + 6])
-    selection_patch = yaml.safe_load(selection_patch_path.read_text(encoding="utf-8"))
-    assert selection_patch == [
-        {
-            "id": "settings",
-            "config": {
-                "path": str(selection_patch_path.parent / "model-selection.yaml"),
-                "watch": False,
-            },
+    selection_patch = captured["selection_patch"]
+    assert selection_patch[0]["id"] == "settings"
+    assert selection_patch[0]["config"]["watch"] is False
+    assert Path(selection_patch[0]["config"]["path"]) == captured["settings_path"]
+    assert captured["effective_settings"] == {
+        "agent-default-model": {
+            "provider": "deepseek-official",
+            "model": "deepseek-v4-flash",
         }
-    ]
+    }
+    assert not captured["settings_path"].exists()
     assert yaml.safe_load(artifacts["dsh/customer-count.model-selection.yaml"]) == {
         "agent-default-model": {
             "provider": "deepseek-official",
@@ -123,6 +132,73 @@ def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
     saved_selection_patch = artifacts["dsh/customer-count.model-selection.patch.yml"]
     assert saved_selection_patch == selection_patch_path.read_text(encoding="utf-8")
     assert artifacts["dsh/customer-count.stdout.log"] == case.final_message
+
+
+def test_dsh_runner_preserves_non_secret_provider_routes_while_locking_model(
+    monkeypatch, tmp_path
+) -> None:
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    source_settings = {
+        "ui-onboarding": {"welcomeNoticeVersion": "2026-08-13.1"},
+        "agent-default-model": {
+            "provider": "deepseek-official",
+            "model": "deepseek-v4-pro",
+        },
+        "llm-pi-ai": {
+            "providers": {
+                "openai": {
+                    "apiKeyEnv": "OPENAI_API_KEY",
+                    "retryPolicy": {"mode": "normal", "maxRetries": 2},
+                }
+            }
+        },
+    }
+    (dsh_home / "settings.yaml").write_text(
+        yaml.safe_dump(source_settings, sort_keys=False), encoding="utf-8"
+    )
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    captured: dict[str, Any] = {}
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        patch_indices = [index for index, value in enumerate(command) if value == "--patch"]
+        patch = yaml.safe_load(Path(command[patch_indices[-1] + 1]).read_text(encoding="utf-8"))
+        settings_path = Path(patch[0]["config"]["path"])
+        captured["settings_path"] = settings_path
+        captured["settings"] = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(command, 0, stdout="```sql\nSELECT 1\n```\n", stderr="")
+
+    monkeypatch.setattr("skill_evolve.runner.dsh.subprocess.run", fake_run)
+    model = ModelConfig(provider="openai", name="gpt-5.6-sol")
+    DshRunner(_config(), None, model).run(_run_input(tmp_path))
+
+    assert captured["settings"] == {
+        "llm-pi-ai": source_settings["llm-pi-ai"],
+        "agent-default-model": {"provider": "openai", "model": "gpt-5.6-sol"},
+    }
+    assert not captured["settings_path"].exists()
+    final_user_settings = yaml.safe_load((dsh_home / "settings.yaml").read_text(encoding="utf-8"))
+    assert final_user_settings == source_settings
+
+
+def test_dsh_runner_rejects_plaintext_provider_credential(monkeypatch, tmp_path) -> None:
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    (dsh_home / "settings.yaml").write_text(
+        "llm-pi-ai:\n  providers:\n    openai:\n      apiKey: sk-not-a-credential-reference\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh.subprocess.run",
+        lambda *args, **kwargs: pytest.fail(
+            "DSH must not start with a plaintext provider credential"
+        ),
+    )
+
+    with pytest.raises(RunnerError, match="DshModelSettingsError"):
+        DshRunner(_config(), None, _model()).run(_run_input(tmp_path))
 
 
 def test_dsh_runner_uses_isolated_task_workspace_with_only_declared_context(

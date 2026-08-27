@@ -31,9 +31,14 @@ SQL policy 和 cases 仍必须固定在 manifest，不能由 `.env` 覆盖。
 
 DSH 用户目录中的 `settings.yaml` 可以保存交互式默认模型，并且它的
 `agent-default-model` 设置会覆盖 profile 的默认值。为保证评测实际使用 manifest 的
-`environment.model.provider` 与 `environment.model.name`，runner 会在每个 run 创建仅含这两个字段的
-非敏感 settings 文件，并将它作为最后一个 DSH `--patch` 传入。故你的全局默认模型仍可用于手工 DSH，
-但不会再覆盖评测；DSH credential store 也不会被复制或重定向。
+`environment.model.provider` 与 `environment.model.name`，runner 会在每个 run 创建一个短生命周期的
+settings 文件，并将它作为最后一个 DSH `--patch` 传入。该文件只保留用户 settings 中经检查的 `llm-*`
+provider route 配置，再写入 manifest 的 `agent-default-model`；交互式默认模型和无关 UI 设置不会继承。
+故你的全局默认模型仍可用于手工 DSH，但不会再覆盖评测；已在 DSH 中配置的 OpenAI 等 provider route
+仍可使用，credential store 也不会被复制或重定向。
+
+provider route 必须使用 `apiKeyEnv` 这类环境变量引用，不能把 API key、token、password 或 Authorization
+值写进 DSH settings。runner 发现此类明文 credential 字段会在启动 DSH 前安全暂停。
 
 每个 case 的 `raw/dsh/<case>.invocation.json` 会记录实际强制的 provider/model，旁边的
 `<case>.model-selection.yaml` 和 `<case>.model-selection.patch.yml` 则保存这次使用的无密钥覆盖内容。
