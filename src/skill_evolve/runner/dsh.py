@@ -7,15 +7,19 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from skill_evolve.config.models import CaseConfig, DshConfig
+import yaml
+
+from skill_evolve.config.models import CaseConfig, DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     AgentExecution,
     RawArtifact,
     RunInput,
     RunnerCaseOutput,
+    RunnerError,
     RunnerExecution,
     RunnerOutput,
     TrajectoryEvent,
@@ -34,6 +38,17 @@ from skill_evolve.runner.redaction import redact_text
 _SQL_BLOCK_PATTERN = re.compile(r"```(?:sql|postgresql)\s*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
 
 
+@dataclass(frozen=True)
+class DshModelSelection:
+    """Non-secret, run-scoped DSH settings used to select the requested model."""
+
+    model: ModelConfig
+    settings_path: Path
+    patch_path: Path
+    settings_content: bytes
+    patch_content: bytes
+
+
 class DshRunner:
     """Run each requested case in a fresh, non-interactive DSH session.
 
@@ -42,16 +57,25 @@ class DshRunner:
     authoritative trajectory evidence.
     """
 
-    def __init__(self, config: DshConfig, profile_patch: Path | None) -> None:
+    def __init__(
+        self, config: DshConfig, profile_patch: Path | None, model: ModelConfig
+    ) -> None:
         self._config = config
         self._profile_patch = profile_patch
+        self._model = model
 
     def run(self, input: RunInput) -> RunnerExecution:
+        try:
+            model_selection = _prepare_model_selection(input, self._model)
+        except OSError as error:
+            raise RunnerError(
+                f"could not prepare DSH model selection: {error.__class__.__name__}"
+            ) from error
         case_outputs: list[RunnerCaseOutput] = []
         raw_artifacts: list[RawArtifact] = []
         stderr_parts: list[str] = []
         for case in input.cases:
-            output, artifacts, stderr = self._run_case(case, input)
+            output, artifacts, stderr = self._run_case(case, input, model_selection)
             case_outputs.append(output)
             raw_artifacts.extend(artifacts)
             if stderr:
@@ -66,12 +90,13 @@ class DshRunner:
         )
 
     def _run_case(
-        self, case: CaseConfig, input: RunInput
+        self, case: CaseConfig, input: RunInput, model_selection: DshModelSelection
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
         command = self._command_for(
             case,
             input.database_access is not None,
             input.candidate is not None,
+            model_selection,
         )
         started_at = _utc_timestamp()
         try:
@@ -84,13 +109,16 @@ class DshRunner:
                 "",
                 str(error),
                 f"could not prepare DSH task workspace: {error.__class__.__name__}",
+                model_selection,
             )
         session_before = None
         if self._config.session_log_root is not None:
             try:
                 session_before = snapshot_session_logs(Path(self._config.session_log_root))
             except DshSessionLogError as error:
-                return self._failed_case(case, command, started_at, "", "", str(error))
+                return self._failed_case(
+                    case, command, started_at, "", "", str(error), model_selection
+                )
         try:
             completed = subprocess.run(
                 command,
@@ -113,6 +141,7 @@ class DshRunner:
                 stdout,
                 stderr,
                 f"DSH timed out after {self._config.timeout_ms} ms",
+                model_selection,
                 _failure_session_artifacts(
                     case.id,
                     session_before,
@@ -128,11 +157,14 @@ class DshRunner:
                 "",
                 str(error),
                 f"could not start DSH: {error.__class__.__name__}",
+                model_selection,
             )
 
         stdout = redact_text(completed.stdout)
         stderr = redact_text(completed.stderr)
-        artifacts = _case_artifacts(case.id, command, stdout, stderr, self._config.timeout_ms)
+        artifacts = _case_artifacts(
+            case.id, command, stdout, stderr, self._config.timeout_ms, model_selection
+        )
         if completed.returncode != 0:
             return (
                 _runner_error_output(
@@ -250,6 +282,7 @@ class DshRunner:
         stdout: str,
         stderr: str,
         reason: str,
+        model_selection: DshModelSelection,
         session_artifacts: tuple[RawArtifact, ...] = (),
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
         redacted_stdout = redact_text(stdout)
@@ -258,7 +291,12 @@ class DshRunner:
             _runner_error_output(case, timestamp, redacted_stdout, reason),
             (
                 *_case_artifacts(
-                    case.id, command, redacted_stdout, redacted_stderr, self._config.timeout_ms
+                    case.id,
+                    command,
+                    redacted_stdout,
+                    redacted_stderr,
+                    self._config.timeout_ms,
+                    model_selection,
                 ),
                 *session_artifacts,
             ),
@@ -270,11 +308,14 @@ class DshRunner:
         case: CaseConfig,
         has_database_access: bool = False,
         has_candidate_skill: bool = False,
+        model_selection: DshModelSelection | None = None,
     ) -> list[str]:
         command = [*_dsh_command_prefix(self._config.binary), "--profile", self._config.profile]
         if self._profile_patch is not None:
             command.extend(("--patch", str(self._profile_patch)))
         command.extend(self._config.runner_args)
+        if model_selection is not None:
+            command.extend(("--patch", str(model_selection.patch_path)))
         command.append(_build_job(case, has_database_access, has_candidate_skill))
         return command
 
@@ -344,6 +385,60 @@ def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
     if input.database_access is not None:
         _write_read_only_query_tool(workspace, input.database_access.query_endpoint)
     return workspace
+
+
+def _prepare_model_selection(input: RunInput, model: ModelConfig) -> DshModelSelection:
+    """Create the final DSH settings overlay without touching user settings or credentials.
+
+    DSH's ``agent-default-model`` settings namespace takes precedence over the
+    profile composition, so a user's interactive default would otherwise change
+    a manifest-declared benchmark model. The final overlay redirects only the
+    settings provider to a run-scoped document; the credentials provider keeps
+    its normal DSH-home location.
+    """
+
+    runtime_directory = _dsh_runtime_directory(input)
+    runtime_directory.mkdir(parents=True, exist_ok=True)
+    settings_path = runtime_directory / "model-selection.yaml"
+    patch_path = runtime_directory / "model-selection.patch.yml"
+    settings_content = yaml.safe_dump(
+        {
+            "agent-default-model": {
+                "provider": model.provider,
+                "model": model.name,
+            }
+        },
+        allow_unicode=True,
+        sort_keys=False,
+    ).encode("utf-8")
+    patch_content = yaml.safe_dump(
+        [
+            {
+                "id": "settings",
+                "config": {
+                    "path": str(settings_path),
+                    "watch": False,
+                },
+            }
+        ],
+        allow_unicode=True,
+        sort_keys=False,
+    ).encode("utf-8")
+    settings_path.write_bytes(settings_content)
+    patch_path.write_bytes(patch_content)
+    return DshModelSelection(
+        model=model,
+        settings_path=settings_path,
+        patch_path=patch_path,
+        settings_content=settings_content,
+        patch_content=patch_content,
+    )
+
+
+def _dsh_runtime_directory(input: RunInput) -> Path:
+    if input.agent_workspace_root is not None:
+        return input.agent_workspace_root.parent / "dsh-runtime"
+    return input.workspace / ".skill-evolve-dsh-runtime"
 
 
 def _write_read_only_query_tool(workspace: Path, query_endpoint: str) -> None:
@@ -441,10 +536,22 @@ def _runner_error_output(
 
 
 def _case_artifacts(
-    case_id: str, command: list[str], stdout: str, stderr: str, timeout_ms: int
+    case_id: str,
+    command: list[str],
+    stdout: str,
+    stderr: str,
+    timeout_ms: int,
+    model_selection: DshModelSelection,
 ) -> tuple[RawArtifact, ...]:
     invocation = json.dumps(
-        {"argv": command[:-1], "timeout_ms": timeout_ms},
+        {
+            "argv": command[:-1],
+            "timeout_ms": timeout_ms,
+            "model": {
+                "provider": model_selection.model.provider,
+                "name": model_selection.model.name,
+            },
+        },
         ensure_ascii=False,
         indent=2,
     )
@@ -458,6 +565,14 @@ def _case_artifacts(
         ),
         RawArtifact(
             relative_path=f"dsh/{case_id}.stderr.log", content=stderr.encode("utf-8")
+        ),
+        RawArtifact(
+            relative_path=f"dsh/{case_id}.model-selection.yaml",
+            content=model_selection.settings_content,
+        ),
+        RawArtifact(
+            relative_path=f"dsh/{case_id}.model-selection.patch.yml",
+            content=model_selection.patch_content,
         ),
     )
 

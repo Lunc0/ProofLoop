@@ -167,7 +167,11 @@ def _run_runner(
         if resolved.fake_output is None:
             raise RunnerError("fake runner requires a fake output file")
         return FakeRunner(resolved.fake_output).run(input)
-    return DshRunner(resolved.manifest.environment.dsh, resolved.profile_patch).run(input)
+    return DshRunner(
+        resolved.manifest.environment.dsh,
+        resolved.profile_patch,
+        resolved.manifest.environment.model,
+    ).run(input)
 
 
 def _finish_paused_run(

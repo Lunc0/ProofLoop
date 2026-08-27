@@ -27,6 +27,19 @@ DSH credential store（推荐）或由操作者预先设置在进程环境中，
 `.env`。`dsh.profile`、模型标识、DSH version、permission mode、可用 tool、PostgreSQL image digest、
 SQL policy 和 cases 仍必须固定在 manifest，不能由 `.env` 覆盖。
 
+## DSH 模型选择
+
+DSH 用户目录中的 `settings.yaml` 可以保存交互式默认模型，并且它的
+`agent-default-model` 设置会覆盖 profile 的默认值。为保证评测实际使用 manifest 的
+`environment.model.provider` 与 `environment.model.name`，runner 会在每个 run 创建仅含这两个字段的
+非敏感 settings 文件，并将它作为最后一个 DSH `--patch` 传入。故你的全局默认模型仍可用于手工 DSH，
+但不会再覆盖评测；DSH credential store 也不会被复制或重定向。
+
+每个 case 的 `raw/dsh/<case>.invocation.json` 会记录实际强制的 provider/model，旁边的
+`<case>.model-selection.yaml` 和 `<case>.model-selection.patch.yml` 则保存这次使用的无密钥覆盖内容。
+在当前 DSH `0.1.1-rc.2` 的 headless public protocol 中，这个覆盖只负责 provider/model 选择；
+`environment.model.params` 仍会进入环境指纹，但不能被视为已传递给 DSH provider 的请求参数。
+
 ## 新机器运行
 
 1. 安装 DSH、Docker Desktop、Python 3.11+ 和 `uv`。

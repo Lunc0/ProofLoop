@@ -57,8 +57,10 @@ class StubQueryService:
 
 
 class StubDshRunner:
-    def __init__(self, config: DshConfig, profile_patch: Path | None) -> None:
-        del config, profile_patch
+    def __init__(
+        self, config: DshConfig, profile_patch: Path | None, model: ModelConfig
+    ) -> None:
+        del config, profile_patch, model
 
     def run(self, input) -> RunnerExecution:
         assert len(input.cases) == 1

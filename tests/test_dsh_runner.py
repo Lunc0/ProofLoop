@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from skill_evolve.candidate import CandidateService, ExternalSource, LocalCandidateStore
 from skill_evolve.candidate.store import skill_sha256_for_source
-from skill_evolve.config.models import CaseConfig, DshConfig
+from skill_evolve.config.models import CaseConfig, DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     ReadOnlyDatabaseAccess,
     RunInput,
@@ -50,6 +51,10 @@ def _config() -> DshConfig:
     )
 
 
+def _model() -> ModelConfig:
+    return ModelConfig(provider="deepseek-official", name="deepseek-v4-flash")
+
+
 def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
     monkeypatch, tmp_path
 ) -> None:
@@ -69,7 +74,7 @@ def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
 
     monkeypatch.setattr("skill_evolve.runner.dsh.subprocess.run", fake_run)
 
-    execution = DshRunner(_config(), profile_patch).run(_run_input(tmp_path))
+    execution = DshRunner(_config(), profile_patch, _model()).run(_run_input(tmp_path))
 
     case = execution.output.cases[0]
     profile_index = captured["command"].index("--profile")
@@ -80,6 +85,8 @@ def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
         str(profile_patch),
     ]
     assert captured["command"][profile_index + 4] == "--example-app-flag"
+    assert captured["command"][profile_index + 5] == "--patch"
+    assert captured["command"][profile_index + 6].endswith("model-selection.patch.yml")
     assert "Count customers by country." in captured["command"][-1]
     assert captured["kwargs"]["cwd"] == tmp_path
     assert captured["kwargs"]["shell"] is False
@@ -90,7 +97,31 @@ def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
         artifact.relative_path: artifact.content.decode("utf-8")
         for artifact in execution.raw_artifacts
     }
-    assert json.loads(artifacts["dsh/customer-count.invocation.json"])["timeout_ms"] == 300_000
+    invocation = json.loads(artifacts["dsh/customer-count.invocation.json"])
+    assert invocation["timeout_ms"] == 300_000
+    assert invocation["model"] == {
+        "provider": "deepseek-official",
+        "name": "deepseek-v4-flash",
+    }
+    selection_patch_path = Path(captured["command"][profile_index + 6])
+    selection_patch = yaml.safe_load(selection_patch_path.read_text(encoding="utf-8"))
+    assert selection_patch == [
+        {
+            "id": "settings",
+            "config": {
+                "path": str(selection_patch_path.parent / "model-selection.yaml"),
+                "watch": False,
+            },
+        }
+    ]
+    assert yaml.safe_load(artifacts["dsh/customer-count.model-selection.yaml"]) == {
+        "agent-default-model": {
+            "provider": "deepseek-official",
+            "model": "deepseek-v4-flash",
+        }
+    }
+    saved_selection_patch = artifacts["dsh/customer-count.model-selection.patch.yml"]
+    assert saved_selection_patch == selection_patch_path.read_text(encoding="utf-8")
     assert artifacts["dsh/customer-count.stdout.log"] == case.final_message
 
 
@@ -122,7 +153,7 @@ def test_dsh_runner_uses_isolated_task_workspace_with_only_declared_context(
         database_access=ReadOnlyDatabaseAccess(query_endpoint="http://127.0.0.1:54321/query"),
     )
 
-    execution = DshRunner(_config(), None).run(run_input)
+    execution = DshRunner(_config(), None, _model()).run(run_input)
 
     workspace = tmp_path / "agent-workspaces" / "customer-count"
     assert captured["cwd"] == workspace
@@ -172,7 +203,7 @@ def test_dsh_runner_injects_only_verified_skill_and_requires_it_to_be_read(
         return subprocess.CompletedProcess(command, 0, stdout="```sql\nSELECT 1\n```\n", stderr="")
 
     monkeypatch.setattr("skill_evolve.runner.dsh.subprocess.run", fake_run)
-    execution = DshRunner(_config(), None).run(
+    execution = DshRunner(_config(), None, _model()).run(
         replace(
             _run_input(tmp_path),
             candidate=candidate,
@@ -228,7 +259,7 @@ def test_dsh_runner_uses_session_log_as_authoritative_evidence(monkeypatch, tmp_
     )
     monkeypatch.setattr("skill_evolve.runner.dsh.normalise_session_log", lambda log: evidence)
 
-    execution = DshRunner(config, None).run(_run_input(tmp_path))
+    execution = DshRunner(config, None, _model()).run(_run_input(tmp_path))
 
     case = execution.output.cases[0]
     assert case.final_message == evidence.final_message
@@ -252,7 +283,7 @@ def test_dsh_runner_treats_nonzero_exit_as_runner_evidence_failure_and_redacts(
 
     monkeypatch.setattr("skill_evolve.runner.dsh.subprocess.run", fake_run)
 
-    execution = DshRunner(_config(), None).run(_run_input(tmp_path))
+    execution = DshRunner(_config(), None, _model()).run(_run_input(tmp_path))
 
     case = execution.output.cases[0]
     artifacts = {
@@ -302,7 +333,7 @@ def test_dsh_runner_preserves_changed_session_log_on_process_failure(
         lambda candidates, workspace: (session_path, loaded_log),
     )
 
-    execution = DshRunner(config, None).run(_run_input(tmp_path))
+    execution = DshRunner(config, None, _model()).run(_run_input(tmp_path))
 
     case = execution.output.cases[0]
     artifacts = {artifact.relative_path: artifact.content for artifact in execution.raw_artifacts}
@@ -326,7 +357,7 @@ def test_dsh_runner_uses_node_entry_for_a_windows_npm_shim(monkeypatch, tmp_path
 
     monkeypatch.setattr("skill_evolve.runner.dsh.shutil.which", fake_which)
 
-    command = DshRunner(_config(), None)._command_for(_run_input(tmp_path).cases[0])
+    command = DshRunner(_config(), None, _model())._command_for(_run_input(tmp_path).cases[0])
 
     assert command[:2] == ["node", str(entry)]
     assert command[2:4] == ["--profile", "headless"]

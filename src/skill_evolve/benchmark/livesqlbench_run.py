@@ -93,7 +93,14 @@ def run_base_lite_dsh_suite(
     for case in suite.cases:
         try:
             runner_case, execution, evaluation = _run_case(
-                case, suite, dsh_config, profile_patch, run, environment_fingerprint, candidate
+                case,
+                suite,
+                dsh_config,
+                profile_patch,
+                model,
+                run,
+                environment_fingerprint,
+                candidate,
             )
         except (LiveSQLBenchFixtureError, RunnerError) as error:
             return _finish_paused_run(
@@ -124,6 +131,7 @@ def _run_case(
     suite: LiveSQLBenchSuite,
     dsh_config: DshConfig,
     profile_patch: Path | None,
+    model: ModelConfig,
     run: RunDirectory,
     environment_fingerprint: str,
     candidate: ResolvedCandidate | None,
@@ -144,7 +152,7 @@ def _run_case(
                 agent_workspace_root=run.path / "agent-workspace",
                 database_access=ReadOnlyDatabaseAccess(query_endpoint=query_service.endpoint),
             )
-            execution = DshRunner(dsh_config, profile_patch).run(input)
+            execution = DshRunner(dsh_config, profile_patch, model).run(input)
         if len(execution.output.cases) != 1:
             raise RunnerError(
                 f"DSH returned {len(execution.output.cases)} outputs for {case.instance_id}"
