@@ -132,8 +132,37 @@ class LiveSQLBenchSuite:
         }
 
 
+@dataclass(frozen=True)
+class LiveSQLBenchMaterials:
+    """Verified shared Base-Lite files used by trusted repository adapters only."""
+
+    data_root: Path
+    public_data_file: Path
+    gt_file: Path
+    dump_root: Path
+    public_records: Mapping[str, Mapping[str, Any]]
+    gt_records: Mapping[str, Mapping[str, Any]]
+
+
 def load_base_lite_suite(data_root: Path) -> LiveSQLBenchSuite:
     """Load and strictly validate the approved Base-Lite Query-only smoke suite."""
+
+    materials = load_livesqlbench_materials(data_root)
+    cases = tuple(
+        build_livesqlbench_case(materials, instance_id)
+        for instance_id in APPROVED_BASE_LITE_QUERY_IDS
+    )
+    return LiveSQLBenchSuite(
+        data_root=materials.data_root,
+        public_data_file=materials.public_data_file,
+        gt_file=materials.gt_file,
+        dump_root=materials.dump_root,
+        cases=cases,
+    )
+
+
+def load_livesqlbench_materials(data_root: Path) -> LiveSQLBenchMaterials:
+    """Load Base-Lite source indexes without selecting an adapter-owned suite."""
 
     try:
         root = data_root.resolve(strict=True)
@@ -150,16 +179,27 @@ def load_base_lite_suite(data_root: Path) -> LiveSQLBenchSuite:
     public_records = _records_by_id(_read_jsonl(public_data_file), "public data")
     gt_records = _records_by_id(_read_jsonl(gt_file), "GT data")
     _require_matching_case_ids(public_records, gt_records)
-    cases = tuple(
-        _build_case(root, instance_id, public_records, gt_records, dump_root)
-        for instance_id in APPROVED_BASE_LITE_QUERY_IDS
-    )
-    return LiveSQLBenchSuite(
+    return LiveSQLBenchMaterials(
         data_root=root,
         public_data_file=public_data_file,
         gt_file=gt_file,
         dump_root=dump_root,
-        cases=cases,
+        public_records=public_records,
+        gt_records=gt_records,
+    )
+
+
+def build_livesqlbench_case(
+    materials: LiveSQLBenchMaterials, instance_id: str
+) -> LiveSQLBenchCase:
+    """Build one fully validated Query case from previously checked Base-Lite files."""
+
+    return _build_case(
+        materials.data_root,
+        instance_id,
+        materials.public_records,
+        materials.gt_records,
+        materials.dump_root,
     )
 
 

@@ -60,6 +60,12 @@ provider route 必须使用 `apiKeyEnv` 这类环境变量引用，不能把 API
 
 运行产生的 `manifest.resolved.yaml` 会保存解析后的非敏感 binary，但永远不会保存 `.env` 中的凭据。
 
+## 最终 Held-out evaluator
+
+最终三十题评测使用独立的 `SKILL_EVOLVE_HELDOUT_ROOT`，并要求 DSH session root 位于其中；它与公开 smoke
+的默认 `runs/` 和 DSH session 配置不同。完整的 clone、custody、DSH provider、manifest 与运行步骤见
+[Held-out evaluator 操作手册](heldout-evaluator.md)。不要把 held-out custody 路径或 manifest 写入仓库 `.env`。
+
 ## LiveSQLBench Base-Lite 本地数据
 
 五题 Query benchmark 使用下列 Git 忽略的目录，不能放在普通 experiment manifest、runner workspace

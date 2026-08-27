@@ -18,6 +18,10 @@ from skill_evolve.benchmark import (
     get_adapter,
 )
 from skill_evolve.benchmark.livesqlbench_adapter import LIVE_SQL_BENCH_DEFAULT_IMAGE
+from skill_evolve.benchmark.livesqlbench_heldout import (
+    HeldOutError,
+    initialise_heldout_manifest,
+)
 from skill_evolve.candidate import (
     CandidateService,
     CandidateStoreError,
@@ -179,6 +183,23 @@ def run_benchmark(
     _run_adapter_dsh(adapter, suite, dsh_manifest, candidate)
 
 
+@benchmark_app.command("initialize-heldout")
+def initialise_heldout_benchmark(
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+) -> None:
+    """Create one evaluator-owned final-suite manifest from public metadata only."""
+
+    try:
+        receipt = initialise_heldout_manifest(
+            data_root,
+            repository_root=Path.cwd(),
+            candidate_store_root=_candidate_root(),
+        )
+    except HeldOutError as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(receipt.public_dict())
+
+
 @livesqlbench_app.command("validate")
 def validate_livesqlbench(
     data_root: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
@@ -287,6 +308,9 @@ def _echo_json(payload: object) -> None:
 
 
 def _echo_run_result(result: BenchmarkRunResult) -> None:
+    if result.public_result is not None:
+        _echo_json(result.public_result)
+        return
     typer.echo(
         json.dumps(
             {

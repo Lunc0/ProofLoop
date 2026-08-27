@@ -51,9 +51,10 @@ class BenchmarkRunResult:
     run_id: str
     status: str
     attribution: str
-    report_path: Path
-    redacted_session_logs_path: Path
+    report_path: Path | None
+    redacted_session_logs_path: Path | None
     exit_code: int
+    public_result: JsonObject | None = None
 
 
 class BenchmarkAdapter(Protocol):

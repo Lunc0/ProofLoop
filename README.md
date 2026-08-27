@@ -77,9 +77,10 @@ See [the v0.1 technical design](docs/design/v0.1-workflow-shell.md) for contract
 
 ## PostgreSQL Benchmark Adapter（v0.4）
 
-推荐使用公开且可扩展的 `benchmark` 命令组。目前唯一的静态注册 adapter 是
-`livesqlbench-base-lite`；它由仓库内受信任的 Python 代码注册。仅向 `data/` 放入一个目录不会发现、
-import 或执行任何 adapter 代码。
+推荐使用公开且可扩展的 `benchmark` 命令组。公开 smoke adapter
+`livesqlbench-base-lite` 与 custody-only 最终 adapter
+`livesqlbench-base-lite-query-final-v1` 都由仓库内受信任的 Python 代码静态注册。仅向 `data/` 放入一个目录
+不会发现、import 或执行任何 adapter 代码。
 
 ```powershell
 uv run skill-evolve benchmark validate livesqlbench-base-lite data/livesqlbench/base-lite
@@ -126,6 +127,14 @@ uv run skill-evolve benchmark evaluate livesqlbench-base-lite data/livesqlbench/
 该命令的 stdout 不包含 gold SQL、GT test cases 或 gold 查询结果；其评分实现了这五个 Query 题的
 `conditions.order` 与官方 Soft-EX 的注释/DISTINCT/ROUND 和两位小数预处理兼容。它是本地回归分数，
 不是官方 leaderboard 提交。
+
+## LiveSQLBench 最终 Held-out（三十题）
+
+`livesqlbench-base-lite-query-final-v1` 是版本冻结后的最终评测，不取代公开五题 smoke。它的 manifest、
+逐题结果和 DSH session 必须留在仓库外的 evaluator custody root，因此不会随 Git clone 分发，也不会自动创建。
+
+新评测者请先阅读[Held-out evaluator 操作手册](docs/heldout-evaluator.md)：它说明如何准备本地数据与 custody、
+配置 DSH session、受控导入或初始化 manifest、运行无模型验证，以及在明确同意 Docker/模型成本后执行最终 run。
 
 原有命令仍是同一实现的兼容入口，可在既有脚本中继续使用：
 
