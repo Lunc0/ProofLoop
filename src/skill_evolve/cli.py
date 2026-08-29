@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, NoReturn, cast
 
 import typer
 from pydantic import ValidationError
@@ -22,18 +22,26 @@ from skill_evolve.benchmark.livesqlbench_heldout import (
     HeldOutError,
     initialise_heldout_manifest,
 )
+from skill_evolve.benchmark.livesqlbench_rotation import (
+    RotationError,
+    RotationKind,
+    create_rotation_manifest,
+    initialise_rotation_reserve,
+)
 from skill_evolve.candidate import (
     CandidateService,
     CandidateStoreError,
     ExternalSource,
     LocalCandidateStore,
     ResolvedCandidate,
+    subject_from_candidate,
 )
 from skill_evolve.candidate.store import skill_sha256_for_source
 from skill_evolve.config import ManifestError, load_manifest
 from skill_evolve.fingerprint import create_snapshot
 from skill_evolve.registry import RunNotFoundError, RunStore
 from skill_evolve.runner.contracts import RunnerOutput
+from skill_evolve.subject import RunSubject
 from skill_evolve.workflow import run_experiment
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -122,11 +130,12 @@ def rerun(
 def validate_benchmark(
     adapter_id: str,
     data_root: Annotated[Path, typer.Argument(file_okay=False)],
+    manifest_id: Annotated[str | None, typer.Option("--manifest")] = None,
 ) -> None:
     """Validate one explicitly registered local benchmark without printing Gold data."""
 
     adapter = _load_adapter(adapter_id)
-    suite = _load_benchmark_suite(adapter, data_root)
+    suite = _load_benchmark_suite(adapter, data_root, manifest_id)
     _echo_json(adapter.public_summary(suite))
 
 
@@ -135,11 +144,12 @@ def check_benchmark_fixture(
     adapter_id: str,
     data_root: Annotated[Path, typer.Argument(file_okay=False)],
     image: Annotated[str, typer.Option("--image")] = LIVE_SQL_BENCH_DEFAULT_IMAGE,
+    manifest_id: Annotated[str | None, typer.Option("--manifest")] = None,
 ) -> None:
     """Restore an adapter's local PostgreSQL fixtures and verify read-only access."""
 
     adapter = _load_adapter(adapter_id)
-    suite = _load_benchmark_suite(adapter, data_root)
+    suite = _load_benchmark_suite(adapter, data_root, manifest_id)
     try:
         result = adapter.fixture_check(suite, image)
     except BenchmarkFixtureError as error:
@@ -153,11 +163,12 @@ def evaluate_benchmark(
     data_root: Annotated[Path, typer.Argument(file_okay=False)],
     runner_output: Annotated[Path, typer.Argument(dir_okay=False)],
     image: Annotated[str, typer.Option("--image")] = LIVE_SQL_BENCH_DEFAULT_IMAGE,
+    manifest_id: Annotated[str | None, typer.Option("--manifest")] = None,
 ) -> None:
     """Score runner output locally without printing Gold SQL or query results."""
 
     adapter = _load_adapter(adapter_id)
-    suite = _load_benchmark_suite(adapter, data_root)
+    suite = _load_benchmark_suite(adapter, data_root, manifest_id)
     output = _load_runner_output(runner_output)
     try:
         result = adapter.evaluate(suite, output, image)
@@ -174,13 +185,19 @@ def run_benchmark(
     data_root: Annotated[Path, typer.Argument(file_okay=False)],
     dsh_manifest: Annotated[Path, typer.Argument(dir_okay=False)],
     candidate_id: Annotated[str | None, typer.Option("--candidate")] = None,
+    manifest_id: Annotated[str | None, typer.Option("--manifest")] = None,
 ) -> None:
     """Run one benchmark through DSH and retain redacted session evidence."""
 
     candidate = _resolve_candidate(candidate_id) if candidate_id is not None else None
     adapter = _load_adapter(adapter_id)
-    suite = _load_benchmark_suite(adapter, data_root)
-    _run_adapter_dsh(adapter, suite, dsh_manifest, candidate)
+    suite = _load_benchmark_suite(adapter, data_root, manifest_id)
+    _run_adapter_dsh(
+        adapter,
+        suite,
+        dsh_manifest,
+        subject_from_candidate(candidate) if candidate is not None else None,
+    )
 
 
 @benchmark_app.command("initialize-heldout")
@@ -196,6 +213,44 @@ def initialise_heldout_benchmark(
             candidate_store_root=_candidate_root(),
         )
     except HeldOutError as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(receipt.public_dict())
+
+
+@benchmark_app.command("initialize-rotation")
+def initialise_rotation_benchmark(
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+) -> None:
+    """Create the custody-only five-per-tier rolling reserve once."""
+
+    try:
+        receipt = initialise_rotation_reserve(
+            data_root,
+            repository_root=Path.cwd(),
+            candidate_store_root=_candidate_root(),
+        )
+    except RotationError as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(receipt.public_dict())
+
+
+@benchmark_app.command("create-rotation-manifest")
+def create_benchmark_rotation_manifest(
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+    kind: Annotated[str, typer.Option("--kind")],
+) -> None:
+    """Create one unlisted custody manifest for Smoke or Evolution."""
+
+    if kind not in {"smoke", "evolution"}:
+        _exit_with_error("rotation kind must be smoke or evolution", 64)
+    try:
+        receipt = create_rotation_manifest(
+            data_root,
+            cast(RotationKind, kind),
+            repository_root=Path.cwd(),
+            candidate_store_root=_candidate_root(),
+        )
+    except RotationError as error:
         _exit_with_error(str(error), 64)
     _echo_json(receipt.public_dict())
 
@@ -266,9 +321,11 @@ def _load_adapter(adapter_id: str) -> BenchmarkAdapter:
         _exit_with_error(str(error), 64)
 
 
-def _load_benchmark_suite(adapter: BenchmarkAdapter, data_root: Path) -> BenchmarkSuite:
+def _load_benchmark_suite(
+    adapter: BenchmarkAdapter, data_root: Path, manifest_id: str | None = None
+) -> BenchmarkSuite:
     try:
-        return adapter.load_suite(data_root)
+        return adapter.load_suite(data_root, manifest_id)
     except BenchmarkAdapterError as error:
         _exit_with_error(str(error), 64)
 
@@ -284,7 +341,7 @@ def _run_adapter_dsh(
     adapter: BenchmarkAdapter,
     suite: BenchmarkSuite,
     dsh_manifest: Path,
-    candidate: ResolvedCandidate | None = None,
+    subject: RunSubject | None = None,
 ) -> None:
     try:
         dsh_resolved = load_manifest(dsh_manifest)
@@ -294,7 +351,7 @@ def _run_adapter_dsh(
             dsh_resolved.profile_patch,
             dsh_resolved.manifest.environment.model,
             _runs_root(),
-            candidate,
+            subject,
         )
     except (BenchmarkAdapterError, ManifestError) as error:
         _exit_with_error(str(error), 64)

@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
-from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.runner.contracts import RunnerOutput
+from skill_evolve.subject import RunSubject
 
 JsonPrimitive: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
@@ -60,9 +60,10 @@ class BenchmarkRunResult:
 class BenchmarkAdapter(Protocol):
     """Trusted repository-code adapter invoked by the public benchmark CLI."""
 
-    adapter_id: str
+    @property
+    def adapter_id(self) -> str: ...
 
-    def load_suite(self, data_root: Path) -> BenchmarkSuite: ...
+    def load_suite(self, data_root: Path, manifest_id: str | None = None) -> BenchmarkSuite: ...
 
     def public_summary(self, suite: BenchmarkSuite) -> JsonObject: ...
 
@@ -79,5 +80,5 @@ class BenchmarkAdapter(Protocol):
         profile_patch: Path | None,
         model: ModelConfig,
         runs_root: Path,
-        candidate: ResolvedCandidate | None = None,
+        subject: RunSubject | None = None,
     ) -> BenchmarkRunResult: ...

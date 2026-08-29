@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from skill_evolve.candidate import CandidateService, LocalCandidateStore
 from skill_evolve.cli import app
 from skill_evolve.registry import RunStore
+from skill_evolve.subject import RunSubject
 
 
 def test_candidate_cli_lifecycle_never_prints_skill_text(tmp_path: Path, monkeypatch) -> None:
@@ -86,8 +87,8 @@ def test_benchmark_run_resolves_verified_candidate_before_adapter_startup(
         captured["adapter_id"] = adapter_id
         return object()
 
-    def load_suite(adapter: object, data_root: Path) -> object:
-        del adapter, data_root
+    def load_suite(adapter: object, data_root: Path, manifest_id: str | None = None) -> object:
+        del adapter, data_root, manifest_id
         return object()
 
     def run_adapter(
@@ -115,4 +116,7 @@ def test_benchmark_run_resolves_verified_candidate_before_adapter_startup(
 
     assert result.exit_code == 0
     assert captured["adapter_id"] == "stub-adapter"
-    assert captured["candidate"] == candidate
+    bound_subject = captured["candidate"]
+    assert isinstance(bound_subject, RunSubject)
+    assert bound_subject.subject_id == candidate.candidate_id
+    assert bound_subject.content_sha256 == candidate.skill_sha256

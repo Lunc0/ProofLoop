@@ -23,7 +23,6 @@ from skill_evolve.benchmark.livesqlbench_heldout import (
     HeldOutError,
     HeldOutLiveSQLBenchSuite,
 )
-from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import CaseConfig, DshConfig, EvaluatorConfig, ModelConfig
 from skill_evolve.evaluator.core import CaseEvaluation, Verdict
 from skill_evolve.registry.store import RunDirectory, RunStore
@@ -39,6 +38,7 @@ from skill_evolve.runner.contracts import (
 from skill_evolve.runner.dsh import DshRunner
 from skill_evolve.sql.livesqlbench import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.sql.readonly_service import ReadOnlyQueryService
+from skill_evolve.subject import RunSubject
 
 _EVALUATOR_VERSION = "livesqlbench-base-lite-soft-ex-v1"
 
@@ -67,7 +67,7 @@ def run_heldout_dsh_suite(
     dsh_config: DshConfig,
     profile_patch: Path | None,
     model: ModelConfig,
-    candidate: ResolvedCandidate | None = None,
+    subject: RunSubject | None = None,
 ) -> HeldOutLiveSQLBenchRunOutcome:
     """Run all selected cases serially, retaining all case evidence only in custody."""
 
@@ -79,9 +79,9 @@ def run_heldout_dsh_suite(
     except HeldOutError as error:
         raise HeldOutLiveSQLBenchRunError(str(error)) from error
     started_at = time.monotonic()
-    environment_fingerprint = _environment_fingerprint(suite, dsh_config, model, candidate)
+    environment_fingerprint = _environment_fingerprint(suite, dsh_config, model, subject)
     _write_initial_custody_evidence(
-        run, suite, dsh_config, model, environment_fingerprint, candidate
+        run, suite, dsh_config, model, environment_fingerprint, subject
     )
     evaluations: list[CaseEvaluation] = []
     runner_cases: list[RunnerCaseOutput] = []
@@ -97,7 +97,7 @@ def run_heldout_dsh_suite(
                 model,
                 run,
                 environment_fingerprint,
-                candidate,
+                subject,
             )
         except (LiveSQLBenchFixtureError, RunnerError) as error:
             return _finish_paused_run(
@@ -106,7 +106,7 @@ def run_heldout_dsh_suite(
                 environment_fingerprint,
                 tuple(evaluations),
                 f"live_fixture_or_runner_invalid: {type(error).__name__}",
-                candidate,
+                subject,
                 _elapsed_milliseconds(started_at),
             )
         evaluations.append(evaluation)
@@ -125,7 +125,7 @@ def run_heldout_dsh_suite(
         suite,
         environment_fingerprint,
         tuple(evaluations),
-        candidate,
+        subject,
         _elapsed_milliseconds(started_at),
     )
 
@@ -138,7 +138,7 @@ def _run_case(
     model: ModelConfig,
     run: RunDirectory,
     environment_fingerprint: str,
-    candidate: ResolvedCandidate | None,
+    subject: RunSubject | None,
 ) -> tuple[RunnerCaseOutput, RunnerExecution, CaseEvaluation]:
     evaluator = EvaluatorConfig(version=_EVALUATOR_VERSION)
     with LiveSQLBenchFixture(suite.dump_root, (case.database_name,), evaluator) as fixture:
@@ -147,10 +147,10 @@ def _run_case(
                 run_id=run.run_id,
                 workspace=suite.data_root,
                 environment_fingerprint=environment_fingerprint,
-                candidate_ref=candidate.candidate_id if candidate is not None else None,
+                subject_ref=subject.subject_id if subject is not None else None,
                 cases=(_runner_case_config(case),),
                 schema_file=case.schema_file,
-                candidate=candidate,
+                subject=subject,
                 case_context_files=((case.instance_id, case.public_context_files[1:]),),
                 agent_workspace_root=run.path / "agent-workspace",
                 database_access=ReadOnlyDatabaseAccess(query_endpoint=query_service.endpoint),
@@ -186,9 +186,9 @@ def _write_initial_custody_evidence(
     dsh_config: DshConfig,
     model: ModelConfig,
     environment_fingerprint: str,
-    candidate: ResolvedCandidate | None,
+    subject: RunSubject | None,
 ) -> None:
-    candidate_binding = candidate.public_binding() if candidate is not None else None
+    subject_binding = subject.public_binding() if subject is not None else None
     environment: dict[str, Any] = {
         "environment_fingerprint": environment_fingerprint,
         "benchmark": {
@@ -200,8 +200,8 @@ def _write_initial_custody_evidence(
         "model": model.model_dump(mode="json"),
         "evaluator": {"version": _EVALUATOR_VERSION},
     }
-    if candidate_binding is not None:
-        environment["candidate"] = candidate_binding
+    if subject_binding is not None:
+        environment["subject"] = subject_binding
     run.write_json("environment.json", environment)
     metadata: dict[str, Any] = {
         "schema_version": "livesqlbench-heldout-v1",
@@ -209,11 +209,11 @@ def _write_initial_custody_evidence(
         "benchmark": suite.manifest.suite_id,
         "phase": "snapshotted",
     }
-    if candidate_binding is not None:
-        metadata["candidate"] = candidate_binding
+    if subject_binding is not None:
+        metadata["subject"] = subject_binding
     run.write_json("run.json", metadata)
-    if candidate is not None:
-        run.materialise_candidate(candidate)
+    if subject is not None:
+        run.materialise_subject(subject)
 
 
 def _write_runner_artifacts(
@@ -230,7 +230,7 @@ def _finish_paused_run(
     environment_fingerprint: str,
     evaluations: tuple[CaseEvaluation, ...],
     reason: str,
-    candidate: ResolvedCandidate | None,
+    subject: RunSubject | None,
     elapsed_milliseconds: int,
 ) -> HeldOutLiveSQLBenchRunOutcome:
     return _write_final_custody_evidence(
@@ -239,7 +239,7 @@ def _finish_paused_run(
         environment_fingerprint,
         evaluations,
         eval_data_failure(reason),
-        candidate,
+        subject,
         elapsed_milliseconds,
     )
 
@@ -249,7 +249,7 @@ def _finish_run(
     suite: HeldOutLiveSQLBenchSuite,
     environment_fingerprint: str,
     evaluations: tuple[CaseEvaluation, ...],
-    candidate: ResolvedCandidate | None,
+    subject: RunSubject | None,
     elapsed_milliseconds: int,
 ) -> HeldOutLiveSQLBenchRunOutcome:
     return _write_final_custody_evidence(
@@ -258,7 +258,7 @@ def _finish_run(
         environment_fingerprint,
         evaluations,
         attribute(evaluations),
-        candidate,
+        subject,
         elapsed_milliseconds,
     )
 
@@ -269,7 +269,7 @@ def _write_final_custody_evidence(
     environment_fingerprint: str,
     evaluations: tuple[CaseEvaluation, ...],
     attribution: Attribution,
-    candidate: ResolvedCandidate | None,
+    subject: RunSubject | None,
     elapsed_milliseconds: int,
 ) -> HeldOutLiveSQLBenchRunOutcome:
     private_evaluations = [public_evaluation_dict(evaluation) for evaluation in evaluations]
@@ -283,15 +283,15 @@ def _write_final_custody_evidence(
         "attribution": attribution.to_dict(),
         "cases": private_evaluations,
     }
-    if candidate is not None:
-        private_result["candidate"] = candidate.public_binding()
+    if subject is not None:
+        private_result["subject"] = subject.public_binding()
     run.write_json("result.json", private_result)
     run.write_text(
         "report.md",
         build_report(run.run_id, environment_fingerprint, attribution, evaluations),
     )
     public_result = _public_result(
-        suite, evaluations, attribution, candidate, elapsed_milliseconds
+        suite, evaluations, attribution, subject, elapsed_milliseconds
     )
     run.write_json("aggregate-result.json", public_result)
     return HeldOutLiveSQLBenchRunOutcome(
@@ -307,14 +307,14 @@ def _public_result(
     suite: HeldOutLiveSQLBenchSuite,
     evaluations: tuple[CaseEvaluation, ...],
     attribution: Attribution,
-    candidate: ResolvedCandidate | None,
+    subject: RunSubject | None,
     elapsed_milliseconds: int,
 ) -> JsonObject:
     metrics = _tier_metrics(suite, evaluations)
     public_result: JsonObject = {
         "suite_id": suite.manifest.suite_id,
         "manifest_sha256": suite.manifest.manifest_sha256,
-        "candidate_binding": _public_candidate_binding(candidate),
+        "subject_binding": _public_subject_binding(subject),
         "status": attribution.status.value,
         "case_count": HELDOUT_CASE_COUNT,
         "tiers": metrics,
@@ -381,12 +381,12 @@ def _total_cost(evaluations: tuple[CaseEvaluation, ...]) -> float | None:
     return sum(known_costs)
 
 
-def _public_candidate_binding(candidate: ResolvedCandidate | None) -> JsonObject | None:
-    if candidate is None:
+def _public_subject_binding(subject: RunSubject | None) -> JsonObject | None:
+    if subject is None:
         return None
     return {
-        "candidate_id": candidate.candidate_id,
-        "skill_sha256": candidate.skill_sha256,
+        "subject_id": subject.subject_id,
+        "content_sha256": subject.content_sha256,
     }
 
 
@@ -394,7 +394,7 @@ def _environment_fingerprint(
     suite: HeldOutLiveSQLBenchSuite,
     dsh_config: DshConfig,
     model: ModelConfig,
-    candidate: ResolvedCandidate | None,
+    subject: RunSubject | None,
 ) -> str:
     payload: dict[str, Any] = {
         "benchmark": suite.manifest.suite_id,
@@ -404,8 +404,8 @@ def _environment_fingerprint(
         "model": model.model_dump(mode="json"),
         "evaluator": _EVALUATOR_VERSION,
     }
-    if candidate is not None:
-        payload["candidate"] = candidate.public_binding()
+    if subject is not None:
+        payload["subject"] = subject.public_binding()
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 

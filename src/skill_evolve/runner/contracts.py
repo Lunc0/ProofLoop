@@ -8,8 +8,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import CaseConfig
+from skill_evolve.subject import RunSubject
 
 
 class RunnerError(RuntimeError):
@@ -65,14 +65,21 @@ class RunInput:
     run_id: str
     workspace: Path
     environment_fingerprint: str
-    candidate_ref: str | None
+    subject_ref: str | None
     cases: tuple[CaseConfig, ...]
     schema_file: Path | None = None
-    candidate_file: Path | None = None
-    candidate: ResolvedCandidate | None = None
+    subject: RunSubject | None = None
     case_context_files: tuple[tuple[str, tuple[Path, ...]], ...] = ()
     agent_workspace_root: Path | None = None
     database_access: ReadOnlyDatabaseAccess | None = None
+
+    def __post_init__(self) -> None:
+        if self.subject is None:
+            if self.subject_ref is not None:
+                raise ValueError("subject_ref requires a RunSubject")
+            return
+        if self.subject_ref != self.subject.subject_id:
+            raise ValueError("subject_ref must match RunSubject.subject_id")
 
     def context_files_for(self, case_id: str) -> tuple[Path, ...]:
         for configured_case_id, paths in self.case_context_files:

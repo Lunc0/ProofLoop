@@ -300,7 +300,7 @@ def test_heldout_run_keeps_case_evidence_in_custody_and_returns_only_aggregates(
     serialised = json.dumps(result.public_result)
     assert result.public_result["status"] == "completed"
     assert result.public_result["case_count"] == 30
-    assert result.public_result["candidate_binding"] is None
+    assert result.public_result["subject_binding"] is None
     assert result.public_result["macro_average"] == 1.0
     assert "simple_db00" not in serialised
     assert "candidate_sql" not in serialised
@@ -310,7 +310,7 @@ def test_heldout_run_keeps_case_evidence_in_custody_and_returns_only_aggregates(
     assert len(custody_runs) == 1
     custody_run = custody_runs[0]
     assert (custody_run / "raw" / "runner-output.json").is_file()
-    assert not (custody_run / "inputs" / "candidate-SKILL.md").exists()
+    assert not (custody_run / "inputs" / "subject-SKILL.md").exists()
     with pytest.raises(BenchmarkAdapterError, match="custody-only"):
         adapter.evaluate(suite, RunnerOutput(schema_version="v1", cases=()), "postgres:test")
 
@@ -340,7 +340,7 @@ def test_heldout_run_keeps_case_evidence_in_custody_and_returns_only_aggregates(
     assert str(custody_root) not in cli_result.stdout
 
 
-def _write_final_suite_fixture(tmp_path: Path) -> Path:
+def _write_final_suite_fixture(tmp_path: Path, database_count: int = 18) -> Path:
     data_root = tmp_path / "base-lite"
     public_root = data_root / "public"
     gt_root = data_root / "gt"
@@ -348,7 +348,7 @@ def _write_final_suite_fixture(tmp_path: Path) -> Path:
     public_records: list[dict[str, object]] = []
     gt_records: list[dict[str, object]] = []
     tiers = ("Simple", "Moderate", "Challenging")
-    databases = tuple(f"db{index:02d}" for index in range(18))
+    databases = tuple(f"db{index:02d}" for index in range(database_count))
     for database in databases:
         public_directory = public_root / database
         public_directory.mkdir(parents=True)

@@ -13,3 +13,4 @@
 | 04 | v0.4 | 已完成 | [PostgreSQL Benchmark Adapter](04-v0.4-postgres-benchmark-adapter-framework.md) | [规格](../specs/04-v0.4-postgres-benchmark-adapter-framework.md) | [公开 adapter](../design/v0.4-postgres-benchmark-adapters.md) |
 | 05 | v0.5 | 已完成 | [本地 Skill 候选版本库](05-v0.5-local-skill-evolution.md) | [规格](../specs/05-v0.5-local-skill-evolution.md) | [实现记录](../design/v0.5-local-skill-evolution.md) |
 | 06 | v0.6 | 已完成；baseline 待授权 | [Base-Lite 三十题最终 Held-out 评测集](06-v0.6-livesqlbench-final-thirty-query-suite.md) | [规格](../specs/06-v0.6-livesqlbench-final-thirty-query-suite.md) | [实现记录](../design/06-v0.6-livesqlbench-final-thirty-query-suite.md) |
+| 07 | v0.7 | 已完成 | [分层滚动评测器](07-v0.7-tiered-rolling-evaluator.md) | [规格](../specs/07-v0.7-tiered-rolling-evaluator.md) | [实现记录](../design/07-v0.7-tiered-rolling-evaluator.md) |

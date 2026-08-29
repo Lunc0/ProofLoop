@@ -4,6 +4,10 @@
 五题 smoke；最终 held-out 则有意不随 Git 分发，因为它的 manifest、逐题结果与 DSH session 都不能进入
 仓库或优化 Skill agent 的输入。
 
+当前本机的统一目录布局，以及固定五题、滚动 Smoke/Evolution 与 Final 的可直接复制命令，见
+[LiveSQLBench evaluator 操作手册](livesqlbench-evaluator-operations.md)。本手册保留 Final 的 custody 创建、
+复现与 DSH provider 配置细节。
+
 ## 先选择正确的路径
 
 | 目标 | 应做什么 | 分数是否可与维护者结果比较 |

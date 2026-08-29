@@ -25,10 +25,10 @@ from skill_evolve.benchmark.livesqlbench_run import (
     LiveSQLBenchRunError,
     run_base_lite_dsh_suite,
 )
-from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig
 from skill_evolve.runner.contracts import RunnerCaseOutput, RunnerOutput
 from skill_evolve.sql import LiveSQLBenchFixture, LiveSQLBenchFixtureError
+from skill_evolve.subject import RunSubject
 
 LIVE_SQL_BENCH_BASE_LITE_ADAPTER_ID = "livesqlbench-base-lite"
 LIVE_SQL_BENCH_DEFAULT_IMAGE = "postgres:14.12"
@@ -40,7 +40,11 @@ class LiveSQLBenchBaseLiteAdapter:
 
     adapter_id = LIVE_SQL_BENCH_BASE_LITE_ADAPTER_ID
 
-    def load_suite(self, data_root: Path) -> LiveSQLBenchSuite:
+    def load_suite(
+        self, data_root: Path, manifest_id: str | None = None
+    ) -> LiveSQLBenchSuite:
+        if manifest_id is not None:
+            raise BenchmarkAdapterError("fixed LiveSQLBench adapter does not accept --manifest")
         try:
             return load_base_lite_suite(data_root)
         except LiveSQLBenchDataError as error:
@@ -115,11 +119,11 @@ class LiveSQLBenchBaseLiteAdapter:
         profile_patch: Path | None,
         model: ModelConfig,
         runs_root: Path,
-        candidate: ResolvedCandidate | None = None,
+        subject: RunSubject | None = None,
     ) -> BenchmarkRunResult:
         try:
             outcome = run_base_lite_dsh_suite(
-                _suite(suite), dsh_config, profile_patch, model, runs_root, candidate
+                _suite(suite), dsh_config, profile_patch, model, runs_root, subject
             )
         except LiveSQLBenchRunError as error:
             raise BenchmarkAdapterError(str(error)) from error

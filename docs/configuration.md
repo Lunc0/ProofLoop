@@ -17,9 +17,12 @@ token、密码、连接串或生产数据库信息放入 manifest。
 |---|---|---|
 | `SKILL_EVOLVE_DSH_BINARY` | skill-evolve | 是，作为非敏感 resolved DSH binary |
 | `SKILL_EVOLVE_DSH_SESSION_LOG_ROOT` | skill-evolve | 是，作为非敏感 resolved DSH session-log root |
+| `SKILL_EVOLVE_HELDOUT_ROOT` | Final adapter | 否；仅指向仓库外 Final custody |
+| `SKILL_EVOLVE_ROTATION_ROOT` | 滚动 adapter | 否；仅指向仓库外 rolling custody |
 
-这两个 `SKILL_EVOLVE_*` 覆盖项的优先级都是：进程环境变量 > manifest workspace 中的
-`.env` > manifest 值（session-log root 未声明时默认 `%USERPROFILE%\\.dsh\\sessions`）。
+前两个 DSH 覆盖项的优先级都是：进程环境变量 > manifest workspace 中的 `.env` > manifest 值
+（session-log root 未声明时默认 `%USERPROFILE%\\.dsh\\sessions`）。两个 custody root 只应在可信
+评测者当前 PowerShell 设置，并且不能与 repository、candidate store 或彼此重叠。
 
 Python 不会加载或复制 `.env` 中的凭据。真实 DSH case 在 run 专属 task workspace 中启动，避免
 Agent 读取 manifest 的 expected query、seed 或 fake result；因此应将 provider credential 配置在
@@ -62,28 +65,32 @@ provider route 必须使用 `apiKeyEnv` 这类环境变量引用，不能把 API
 
 ## 最终 Held-out evaluator
 
-最终三十题评测使用独立的 `SKILL_EVOLVE_HELDOUT_ROOT`，并要求 DSH session root 位于其中；它与公开 smoke
-的默认 `runs/` 和 DSH session 配置不同。完整的 clone、custody、DSH provider、manifest 与运行步骤见
-[Held-out evaluator 操作手册](heldout-evaluator.md)。不要把 held-out custody 路径或 manifest 写入仓库 `.env`。
+最终三十题评测使用独立的 `SKILL_EVOLVE_HELDOUT_ROOT`，并要求 DSH session root 位于其中；它与固定五题
+或滚动测评的普通 `runs/` 不同。滚动 Smoke/Evolution 另使用 `SKILL_EVOLVE_ROTATION_ROOT` 保存 reserve、
+manifest 和 Smoke gate。完整的目录布局与命令见
+[LiveSQLBench evaluator 操作手册](livesqlbench-evaluator-operations.md)；Final 细节见
+[Held-out evaluator 操作手册](heldout-evaluator.md)。不要把 custody 路径、manifest 或凭据写入仓库 `.env`。
 
 ## LiveSQLBench Base-Lite 本地数据
 
-五题 Query benchmark 使用下列 Git 忽略的目录，不能放在普通 experiment manifest、runner workspace
-或 `runs/` 中：
+LiveSQLBench 数据根应位于仓库外。当前本机布局使用
+`D:\skill-evolve-evaluator\data\livesqlbench\base-lite\`，不能放在普通 experiment manifest、runner
+workspace 或 `runs/` 中：
 
 | 目录 | 内容 | 可见性 |
 |---|---|---|
-| `data/livesqlbench/base-lite/public/` | 官方公开题目、schema、HKB、字段说明 | Agent 可使用 |
-| `data/livesqlbench/base-lite/gt/` | 获授权的 `sol_sql`、知识映射、Test Cases | 仅本地 evaluator |
-| `data/livesqlbench/base-lite/dumps/` | 官方 PostgreSQL table dumps | 仅本地 fixture |
+| `$DataRoot\public\` | 官方公开题目、schema、HKB、字段说明 | Agent 可使用 |
+| `$DataRoot\gt\` | 获授权的 `sol_sql`、知识映射、Test Cases | 仅本地 evaluator |
+| `$DataRoot\dumps\` | 官方 PostgreSQL table dumps | 仅本地 fixture |
 
 校验、恢复与离线评分依次为：
 
 ```powershell
-uv run skill-evolve livesqlbench validate data/livesqlbench/base-lite
-uv run skill-evolve livesqlbench fixture-check data/livesqlbench/base-lite
-uv run skill-evolve livesqlbench run data/livesqlbench/base-lite examples/sql-agent/experiment.dsh.yaml
-uv run skill-evolve livesqlbench evaluate data/livesqlbench/base-lite <runner-output.json>
+$DataRoot = 'D:\skill-evolve-evaluator\data\livesqlbench\base-lite'
+uv run skill-evolve benchmark validate livesqlbench-base-lite $DataRoot
+uv run skill-evolve benchmark fixture-check livesqlbench-base-lite $DataRoot
+uv run skill-evolve benchmark run livesqlbench-base-lite $DataRoot examples/sql-agent/experiment.dsh.yaml
+uv run skill-evolve benchmark evaluate livesqlbench-base-lite $DataRoot <runner-output.json>
 ```
 
 `fixture-check` 和 `evaluate` 需要 Docker Desktop 与本地 `postgres:14.12` 镜像。若数据或 dump 缺失、GT
@@ -92,3 +99,6 @@ uv run skill-evolve livesqlbench evaluate data/livesqlbench/base-lite <runner-ou
 自动 `run` 是串行的：每题在新的 disposable PostgreSQL 14.12 容器中运行，DSH 只获得该题的公开
 schema、HKB/字段说明和本地只读查询能力。每题结束后，来自 DSH session-log root 的日志会先脱敏，再保存
 为 `runs/<run-id>/raw/dsh/<题目>.session.jsonl`；GT 不会进入 DSH workspace、runner output 或评测报告。
+
+固定五题、Smoke、Evolution 和 Final 的带/不带 candidate 命令见
+[LiveSQLBench evaluator 操作手册](livesqlbench-evaluator-operations.md)。

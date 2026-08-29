@@ -12,7 +12,12 @@ from typing import Any
 import pytest
 import yaml
 
-from skill_evolve.candidate import CandidateService, ExternalSource, LocalCandidateStore
+from skill_evolve.candidate import (
+    CandidateService,
+    ExternalSource,
+    LocalCandidateStore,
+    subject_from_candidate,
+)
 from skill_evolve.candidate.store import skill_sha256_for_source
 from skill_evolve.config.models import CaseConfig, DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
@@ -31,7 +36,7 @@ def _run_input(workspace: Path) -> RunInput:
         run_id="run-123",
         workspace=workspace,
         environment_fingerprint="f" * 64,
-        candidate_ref=None,
+        subject_ref=None,
         cases=(
             CaseConfig(
                 id="customer-count",
@@ -282,16 +287,17 @@ def test_dsh_runner_injects_only_verified_skill_and_requires_it_to_be_read(
     execution = DshRunner(_config(), None, _model()).run(
         replace(
             _run_input(tmp_path),
-            candidate=candidate,
+            subject=subject_from_candidate(candidate),
+            subject_ref=candidate.candidate_id,
             agent_workspace_root=tmp_path / "agent-workspaces",
         )
     )
 
     workspace = captured["cwd"]
-    assert (workspace / "candidate" / "SKILL.md").read_bytes() == candidate.skill_bytes
-    assert not (workspace / "candidate" / "NOTICE.md").exists()
-    assert "candidate/SKILL.md" in (workspace / "TASK.md").read_text(encoding="utf-8")
-    assert "candidate/SKILL.md" in captured["command"][-1]
+    assert (workspace / "subject" / "SKILL.md").read_bytes() == candidate.skill_bytes
+    assert not (workspace / "subject" / "NOTICE.md").exists()
+    assert "subject/SKILL.md" in (workspace / "TASK.md").read_text(encoding="utf-8")
+    assert "subject/SKILL.md" in captured["command"][-1]
     assert execution.output.cases[0].candidate_sql == "SELECT 1"
 
 

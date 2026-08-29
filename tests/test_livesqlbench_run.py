@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from skill_evolve.benchmark.livesqlbench_run import run_base_lite_dsh
-from skill_evolve.candidate import CandidateService, LocalCandidateStore
+from skill_evolve.candidate import CandidateService, LocalCandidateStore, subject_from_candidate
 from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     RawArtifact,
@@ -118,17 +118,17 @@ def test_automatic_run_writes_redacted_session_evidence_without_gt(tmp_path, mon
 def test_automatic_run_binds_verified_candidate_without_notices_or_gt(
     tmp_path, monkeypatch
 ) -> None:
-    captured_candidate_ids: list[str] = []
+    captured_subject_ids: list[str] = []
 
     class CandidateStubDshRunner(StubDshRunner):
         def run(self, input) -> RunnerExecution:
-            assert input.candidate is not None
-            assert input.candidate_ref == input.candidate.candidate_id
-            assert input.candidate.skill_bytes == b"# Candidate\n"
+            assert input.subject is not None
+            assert input.subject_ref == input.subject.subject_id
+            assert input.subject.content == b"# Candidate\n"
             assert all(
                 "gt" not in path.parts for path in input.context_files_for(input.cases[0].id)
             )
-            captured_candidate_ids.append(input.candidate.candidate_id)
+            captured_subject_ids.append(input.subject.subject_id)
             return super().run(input)
 
     monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
@@ -154,15 +154,16 @@ def test_automatic_run_binds_verified_candidate_without_notices_or_gt(
         None,
         ModelConfig(provider="test", name="stub"),
         tmp_path / "runs",
-        candidate,
+        subject_from_candidate(candidate),
     )
 
     environment = json.loads((outcome.run.path / "environment.json").read_text(encoding="utf-8"))
     result = json.loads((outcome.run.path / "result.json").read_text(encoding="utf-8"))
-    assert captured_candidate_ids == [candidate.candidate_id] * 5
-    assert environment["candidate"] == candidate.public_binding()
-    assert result["candidate"] == candidate.public_binding()
-    candidate_input = outcome.run.path / "inputs" / "candidate-SKILL.md"
-    assert candidate_input.read_bytes() == candidate.skill_bytes
+    subject = subject_from_candidate(candidate)
+    assert captured_subject_ids == [subject.subject_id] * 5
+    assert environment["subject"] == subject.public_binding()
+    assert result["subject"] == subject.public_binding()
+    subject_input = outcome.run.path / "inputs" / "subject-SKILL.md"
+    assert subject_input.read_bytes() == candidate.skill_bytes
     assert not (outcome.run.path / "inputs" / "NOTICE.md").exists()
     assert "private gold" not in (outcome.run.path / "result.json").read_text(encoding="utf-8")

@@ -15,12 +15,20 @@ from skill_evolve.benchmark.livesqlbench_adapter import LiveSQLBenchBaseLiteAdap
 from skill_evolve.benchmark.livesqlbench_heldout_adapter import (
     LiveSQLBenchBaseLiteHeldOutAdapter,
 )
+from skill_evolve.benchmark.livesqlbench_rotation_adapter import (
+    LiveSQLBenchBaseLiteEvolutionAdapter,
+    LiveSQLBenchBaseLiteSmokeRotationAdapter,
+)
 
 _ADAPTER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _ADAPTERS: MappingProxyType[str, BenchmarkAdapter] = MappingProxyType(
     {
         LiveSQLBenchBaseLiteAdapter.adapter_id: LiveSQLBenchBaseLiteAdapter(),
         LiveSQLBenchBaseLiteHeldOutAdapter.adapter_id: LiveSQLBenchBaseLiteHeldOutAdapter(),
+        LiveSQLBenchBaseLiteSmokeRotationAdapter.adapter_id: (
+            LiveSQLBenchBaseLiteSmokeRotationAdapter()
+        ),
+        LiveSQLBenchBaseLiteEvolutionAdapter.adapter_id: LiveSQLBenchBaseLiteEvolutionAdapter(),
     }
 )
 
