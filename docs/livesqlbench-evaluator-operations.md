@@ -128,6 +128,27 @@ Final 是固定的 `livesqlbench-base-lite-query-final-v1`，不滚动、不创�
 Docker、DSH 或模型。已迁移的 `heldout` 目录中已有 Final manifest，因此**不要**对该目录再运行
 `initialize-heldout`。
 
+### Provider 凭据运行前检查
+
+`enter-heldout.ps1` 会把 `DSH_HOME` 切换到 Final custody，以隔离完整 session 与运行状态。它**不会**复制、
+导出或写入任何 provider 凭据。因此，“平时手工 DSH 已能调用模型”不代表这个 Held-out PowerShell 已能使用
+同一凭据：要以 `dsh-session-logs\settings.yaml` 中所选 provider route 为准。
+
+若该 route 使用 `apiKeyEnv`，其中指定的环境变量必须在**当前 PowerShell 进程**中已有值。当前随项目示例使用
+DeepSeek route 时，该变量为 `DEEPSEEK_API_KEY`。在启动 Docker、DSH 或模型前执行：
+
+```powershell
+$ProviderKeyEnv = 'DEEPSEEK_API_KEY'
+
+if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($ProviderKeyEnv, 'Process'))) {
+  throw "$ProviderKeyEnv is not available in this Held-out PowerShell session."
+}
+```
+
+若你使用另一 provider，先查看 custody `settings.yaml` 中对应的 `apiKeyEnv` 名称，再将 `$ProviderKeyEnv`
+改为该名称。应通过组织认可的 secret manager 或 Windows 用户级环境变量在新 PowerShell 中提供该值；不要将 key
+写进仓库、普通 `.env`、DSH `settings.yaml`、manifest、Git 或聊天。这个检查只确认变量是否存在，绝不显示其值。
+
 ```powershell
 # 无模型、无 Docker 的一致性验证
 uv run skill-evolve benchmark validate `

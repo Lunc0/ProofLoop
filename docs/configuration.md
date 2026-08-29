@@ -69,7 +69,8 @@ provider route 必须使用 `apiKeyEnv` 这类环境变量引用，不能把 API
 或滚动测评的普通 `runs/` 不同。滚动 Smoke/Evolution 另使用 `SKILL_EVOLVE_ROTATION_ROOT` 保存 reserve、
 manifest 和 Smoke gate。完整的目录布局与命令见
 [LiveSQLBench evaluator 操作手册](livesqlbench-evaluator-operations.md)；Final 细节见
-[Held-out evaluator 操作手册](heldout-evaluator.md)。不要把 custody 路径、manifest 或凭据写入仓库 `.env`。
+[Held-out evaluator 操作手册](heldout-evaluator.md)。Final 切换独立 `DSH_HOME` 后，必须在同一个 PowerShell
+检查 custody provider route 所需的 `apiKeyEnv` 已存在；不要把 custody 路径、manifest 或凭据写入仓库 `.env`。
 
 ## LiveSQLBench Base-Lite 本地数据
 

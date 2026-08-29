@@ -87,6 +87,24 @@ llm-pi-ai:
 
 不要把上述变量或 custody 路径保存到仓库 `.env`、Git 或 coding agent 的长期环境中。
 
+### Provider 凭据运行前检查
+
+`enter-heldout.ps1` 或上面的手工设置会切换 `DSH_HOME`，但不会复制、导出或写入 provider 凭据。因此即使日常
+DSH 已配置并可用，仍必须在这个 Held-out PowerShell 中确认 custody `settings.yaml` 所用 route 可以取到凭据。
+若 route 使用 `apiKeyEnv`，其变量必须已存在于当前进程；此检查不显示密钥：
+
+```powershell
+$ProviderKeyEnv = '<the apiKeyEnv value from custody settings.yaml>'
+
+if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($ProviderKeyEnv, 'Process'))) {
+  throw "$ProviderKeyEnv is not available in this Held-out PowerShell session."
+}
+```
+
+请通过组织认可的 secret manager 或操作系统用户级环境变量提供该值后，重新打开 Held-out PowerShell；不要把它
+写进 repository、`.env`、manifest 或 `settings.yaml`。如果 route 使用 DSH credential store 而不是 `apiKeyEnv`，
+请按照该 provider 的认证方式配置，并在明确授权真实运行前先做一次受控检查。
+
 ## 4. 获得或初始化 manifest
 
 ### 复现维护者的最终集
