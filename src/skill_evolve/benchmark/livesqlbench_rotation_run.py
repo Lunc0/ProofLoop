@@ -13,7 +13,11 @@ from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
-from skill_evolve.benchmark.livesqlbench import LiveSQLBenchSuite, public_evaluation_dict
+from skill_evolve.benchmark.livesqlbench import (
+    LiveSQLBenchCase,
+    LiveSQLBenchSuite,
+    public_evaluation_dict,
+)
 from skill_evolve.benchmark.livesqlbench_rotation import (
     ROTATION_TIERS,
     RotationCustody,
@@ -29,9 +33,22 @@ from skill_evolve.benchmark.livesqlbench_run import (
 from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.evaluator.core import CaseEvaluation, Verdict
 from skill_evolve.registry.store import RunDirectory, RunStore
-from skill_evolve.runner.contracts import RunnerCaseOutput, RunnerError, RunnerOutput
+from skill_evolve.runner.contracts import (
+    RawArtifact,
+    RunnerCaseOutput,
+    RunnerError,
+    RunnerExecution,
+    RunnerOutput,
+)
 from skill_evolve.sql.livesqlbench import LiveSQLBenchFixtureError
 from skill_evolve.subject import RunSubject
+from skill_evolve.trajectory.agent_input import build_evolution_agent_input
+from skill_evolve.trajectory.compressor import (
+    TrajectoryCompressionError,
+    canonical_json_bytes,
+    compress_session_jsonl,
+)
+from skill_evolve.trajectory.contracts import CompressedTrajectory
 
 RollingRunStatus = Literal["passed", "task_failure", "runner_invalid", "evaluator_invalid"]
 
@@ -89,6 +106,8 @@ def run_rotation_dsh_suite(
     evaluations: list[CaseEvaluation] = []
     runner_cases: list[RunnerCaseOutput] = []
     trajectories: list[dict[str, Any]] = []
+    agent_cases: list[tuple[LiveSQLBenchCase, CompressedTrajectory]] = []
+    omitted_agent_cases: list[dict[str, str]] = []
     stderr_parts: list[str] = []
     infrastructure_status: RollingRunStatus | None = None
 
@@ -114,6 +133,15 @@ def run_rotation_dsh_suite(
         runner_cases.append(runner_case)
         trajectories.append(_public_trajectory(runner_case))
         _write_runner_artifacts(run, case, execution)
+        if suite.kind == "evolution":
+            compressed, omission = _compress_evolution_case(
+                runner_case, execution, evaluation, dsh_config.timeout_ms
+            )
+            if compressed is None:
+                assert omission is not None
+                omitted_agent_cases.append(omission)
+            else:
+                agent_cases.append((case, compressed))
         if execution.stderr:
             stderr_parts.append(f"[{case.instance_id}]\n{execution.stderr}")
 
@@ -124,6 +152,15 @@ def run_rotation_dsh_suite(
     if stderr_parts:
         run.write_text("raw/runner.stderr.log", "\n\n".join(stderr_parts))
     run.write_json("trajectory.json", {"cases": trajectories})
+    if suite.kind == "evolution":
+        _write_evolution_agent_input(
+            run,
+            suite,
+            environment_fingerprint,
+            subject,
+            tuple(agent_cases),
+            tuple(omitted_agent_cases),
+        )
     status = _status_for(evaluations, infrastructure_status)
     comparison_key = (
         _comparison_key(suite, dsh_config, model) if suite.kind == "evolution" else None
@@ -139,6 +176,101 @@ def run_rotation_dsh_suite(
             environment_fingerprint,
         )
     return outcome
+
+
+def _compress_evolution_case(
+    runner_case: RunnerCaseOutput,
+    execution: RunnerExecution,
+    evaluation: CaseEvaluation,
+    timeout_ms: int,
+) -> tuple[CompressedTrajectory | None, dict[str, str] | None]:
+    """Compress only runner-owned, already-redacted session evidence."""
+
+    session = _session_artifact_for_case(
+        execution.raw_artifacts, runner_case.case_id
+    )
+    if session is None:
+        return None, {"case_id": runner_case.case_id, "reason": "session_evidence_missing"}
+    runner_outcome = "timeout" if _is_timeout_case(runner_case) else runner_case.status
+    try:
+        compressed = compress_session_jsonl(
+            session.content,
+            runner_case,
+            evaluation,
+            runner_outcome=runner_outcome,
+            deadline_ms=timeout_ms if runner_outcome == "timeout" else None,
+        )
+    except TrajectoryCompressionError:
+        return None, {"case_id": runner_case.case_id, "reason": "session_unavailable"}
+    if compressed.trace.trace_completeness == "partial_insufficient":
+        return None, {"case_id": runner_case.case_id, "reason": "partial_insufficient"}
+    return compressed, None
+
+
+def _session_artifact_for_case(
+    artifacts: tuple[RawArtifact, ...], case_id: str
+) -> RawArtifact | None:
+    target = f"dsh/{case_id}.session.jsonl"
+    matches = tuple(artifact for artifact in artifacts if artifact.relative_path == target)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _is_timeout_case(runner_case: RunnerCaseOutput) -> bool:
+    execution = runner_case.agent_execution
+    return (
+        execution is not None
+        and execution.error is not None
+        and "timed out" in execution.error.lower()
+    )
+
+
+def _write_evolution_agent_input(
+    run: RunDirectory,
+    suite: RotationLiveSQLBenchSuite,
+    environment_fingerprint: str,
+    subject: RunSubject,
+    cases: tuple[tuple[LiveSQLBenchCase, CompressedTrajectory], ...],
+    omitted_cases: tuple[dict[str, str], ...],
+) -> None:
+    """Persist agent-visible development evidence without changing benchmark outcomes."""
+
+    try:
+        agent_input = build_evolution_agent_input(
+            suite.manifest.manifest_sha256,
+            environment_fingerprint,
+            subject,
+            cases,
+            omitted_cases,
+        )
+    except TrajectoryCompressionError:
+        run.write_json(
+            "agent-input/manifest.json",
+            {
+                "schema_version": "evolution-coding-agent-input-v1",
+                "exposed_for_optimization": True,
+                "quality": "unavailable",
+                "included_case_count": 0,
+                "omitted_case_count": len(omitted_cases),
+            },
+        )
+        return
+    payload = canonical_json_bytes(agent_input.model_dump(mode="json"))
+    run.write_bytes("agent-input/trajectory.json", payload + b"\n")
+    run.write_json(
+        "agent-input/manifest.json",
+        {
+            "schema_version": "evolution-coding-agent-input-v1",
+            "exposed_for_optimization": True,
+            "manifest_sha256": suite.manifest.manifest_sha256,
+            "environment_fingerprint": environment_fingerprint,
+            "policy_sha256": agent_input.policy_sha256,
+            "agent_input_sha256": hashlib.sha256(payload).hexdigest(),
+            "included_case_count": len(agent_input.trajectories),
+            "omitted_case_count": len(agent_input.omitted_cases),
+        },
+    )
 
 
 def has_successful_smoke_gate(custody: RotationCustody, subject: RunSubject) -> bool:

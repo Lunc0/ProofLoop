@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from skill_evolve.benchmark.livesqlbench_rotation_run import (
 )
 from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
+    AgentExecution,
     RawArtifact,
     RunnerCaseOutput,
     RunnerExecution,
@@ -93,7 +95,7 @@ class PassingStubDshRunner:
             raw_artifacts=(
                 RawArtifact(
                     relative_path=f"dsh/{case.id}.session.jsonl",
-                    content=b'{"type":"session","value":"redacted"}\n',
+                    content=_session_jsonl(case.id),
                 ),
             ),
         )
@@ -109,7 +111,39 @@ class TaskFailureStubDshRunner(PassingStubDshRunner):
             trajectory=(),
         )
         output = RunnerOutput(schema_version="v1", cases=(output_case,))
-        return RunnerExecution(output=output, raw_output=(output.model_dump_json() + "\n").encode())
+        return RunnerExecution(
+            output=output,
+            raw_output=(output.model_dump_json() + "\n").encode(),
+            raw_artifacts=(
+                RawArtifact(
+                    relative_path=f"dsh/{case.id}.session.jsonl",
+                    content=_session_jsonl(case.id),
+                ),
+            ),
+        )
+
+
+class TimeoutStubDshRunner(PassingStubDshRunner):
+    def run(self, input) -> RunnerExecution:
+        case = input.cases[0]
+        output_case = RunnerCaseOutput(
+            case_id=case.id,
+            status="runner_error",
+            candidate_sql=None,
+            trajectory=(),
+            agent_execution=AgentExecution(status="error", error="DSH timed out after 300000 ms"),
+        )
+        output = RunnerOutput(schema_version="v1", cases=(output_case,))
+        return RunnerExecution(
+            output=output,
+            raw_output=(output.model_dump_json() + "\n").encode(),
+            raw_artifacts=(
+                RawArtifact(
+                    relative_path=f"dsh/{case.id}.session.jsonl",
+                    content=_partial_session_jsonl(case.id),
+                ),
+            ),
+        )
 
 
 def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
@@ -144,6 +178,37 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     assert evolution.public_result["macro_average"] == 1.0
     assert evolution.comparison_key is not None
     assert compare_evolution_results(evolution, evolution) == "comparable"
+    agent_input = evolution.run.path / "agent-input" / "trajectory.json"
+    assert agent_input.is_file()
+    assert not (smoke.run.path / "agent-input").exists()
+    agent_input_text = agent_input.read_text(encoding="utf-8")
+    assert "expected_query" not in agent_input_text
+    assert "Markdown fenced code block" in agent_input_text
+
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", TaskFailureStubDshRunner
+    )
+    task_failure = run_rotation_dsh_suite(
+        evolution_suite, dsh_config, None, model, tmp_path / "runs", subject
+    )
+    task_failure_input = (task_failure.run.path / "agent-input" / "trajectory.json").read_text(
+        encoding="utf-8"
+    )
+    assert task_failure.status == "task_failure"
+    assert '"verdict":"no_sql_generated"' in task_failure_input
+
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", TimeoutStubDshRunner
+    )
+    timeout = run_rotation_dsh_suite(
+        evolution_suite, dsh_config, None, model, tmp_path / "runs", subject
+    )
+    timeout_input = (timeout.run.path / "agent-input" / "trajectory.json").read_text(
+        encoding="utf-8"
+    )
+    assert timeout.status == "runner_invalid"
+    assert '"trace_completeness":"partial_actionable"' in timeout_input
+    assert '"runner_outcome":"timeout"' in timeout_input
 
     monkeypatch.setattr(
         "skill_evolve.benchmark.livesqlbench_run.DshRunner", TaskFailureStubDshRunner
@@ -196,3 +261,39 @@ def _subject(content: str) -> RunSubject:
         content_sha256=hashlib.sha256(content_bytes).hexdigest(),
         content=content_bytes,
     )
+
+
+def _session_jsonl(case_id: str) -> bytes:
+    events = (
+        {"type": "session", "version": 0, "id": f"session-{case_id}", "createdAt": 1},
+        {
+            "type": "assistant/message",
+            "seq": 1,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                "usage": {"inputTokens": 1, "outputTokens": 1},
+            },
+        },
+        {"type": "turn/end", "seq": 2, "data": {"turn": 1, "reason": {"kind": "completed"}}},
+    )
+    return b"".join(json.dumps(event, sort_keys=True).encode("utf-8") + b"\n" for event in events)
+
+
+def _partial_session_jsonl(case_id: str) -> bytes:
+    events = (
+        {"type": "session", "version": 0, "id": f"session-{case_id}", "createdAt": 1},
+        {
+            "type": "tool/call",
+            "seq": 1,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "callId": "call-1",
+                "name": "read",
+                "arguments": '{"path":"schema.sql"}',
+            },
+        },
+    )
+    return b"".join(json.dumps(event, sort_keys=True).encode("utf-8") + b"\n" for event in events)

@@ -156,7 +156,25 @@ def load_session_log(path: Path, node_binary: str = "node") -> LoadedDshSessionL
         raise DshSessionLogError(f"could not decode DSH session log: {detail[:300]}")
     if len(completed.stdout) > _MAX_DECOMPRESSED_BYTES:
         raise DshSessionLogError("session log exceeds decompressed size limit")
-    return _load_jsonl(completed.stdout.decode("utf-8", errors="strict"))
+    return load_redacted_session_jsonl(completed.stdout)
+
+
+def load_redacted_session_jsonl(value: bytes) -> LoadedDshSessionLog:
+    """Load a bounded JSONL artifact that has already passed runner redaction.
+
+    The parser performs redaction again defensively. Unlike
+    :func:`normalise_session_log`, this helper deliberately permits a partial
+    session: timeout evidence can contain useful actions without ``turn/end``.
+    """
+
+    if not value:
+        raise DshSessionLogError("session log is empty")
+    if len(value) > _MAX_DECOMPRESSED_BYTES:
+        raise DshSessionLogError("session log exceeds decompressed size limit")
+    try:
+        return _load_jsonl(value.decode("utf-8", errors="strict"))
+    except UnicodeDecodeError as error:
+        raise DshSessionLogError("session log is not valid UTF-8") from error
 
 
 def normalise_session_log(log: LoadedDshSessionLog) -> SessionEvidence:
