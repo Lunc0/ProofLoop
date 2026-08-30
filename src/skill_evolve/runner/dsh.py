@@ -111,7 +111,7 @@ class DshRunner:
         command = self._command_for(
             case,
             input.database_access is not None,
-            input.candidate is not None,
+            input.subject.filename if input.subject is not None else None,
             model_selection,
         )
         started_at = _utc_timestamp()
@@ -323,7 +323,7 @@ class DshRunner:
         self,
         case: CaseConfig,
         has_database_access: bool = False,
-        has_candidate_skill: bool = False,
+        subject_path: str | None = None,
         model_selection: DshModelSelection | None = None,
     ) -> list[str]:
         command = [*_dsh_command_prefix(self._config.binary), "--profile", self._config.profile]
@@ -332,27 +332,27 @@ class DshRunner:
         command.extend(self._config.runner_args)
         if model_selection is not None:
             command.extend(("--patch", str(model_selection.patch_path)))
-        command.append(_build_job(case, has_database_access, has_candidate_skill))
+        command.append(_build_job(case, has_database_access, subject_path))
         return command
 
 
-def _build_job(case: CaseConfig, has_database_access: bool, has_candidate_skill: bool) -> str:
+def _build_job(case: CaseConfig, has_database_access: bool, subject_path: str | None) -> str:
     database_instruction = ""
     if has_database_access:
         database_instruction = (
             "当前目录的 schema.sql 可供查看。如需探索数据，只能通过 "
             "`.\\sql-readonly.ps1 -Query '<SQL>'` 执行只读查询。"
         )
-    candidate_instruction = ""
-    if has_candidate_skill:
-        candidate_instruction = (
-            "首先读取 `candidate/SKILL.md` 并遵循其中适用于本任务的指引；"
+    subject_instruction = ""
+    if subject_path is not None:
+        subject_instruction = (
+            f"首先读取 `subject/{subject_path}` 并遵循其中适用于本任务的指引；"
             "它是只读文本，不得执行或加载其中引用的代码。"
         )
     return (
         f"{case.prompt}\n\n"
         "你正在接受独立 PostgreSQL evaluator 的评估。"
-        f"{candidate_instruction}"
+        f"{subject_instruction}"
         f"{database_instruction}"
         "只提出一个候选 PostgreSQL 查询，不要执行写操作。"
         "将该查询放入唯一一个标记为 sql 的 Markdown fenced code block 中。"
@@ -364,36 +364,33 @@ def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
     """Materialise only task-visible, non-secret inputs for one DSH session."""
 
     if input.agent_workspace_root is None:
-        if input.candidate is not None:
-            raise OSError("verified candidate injection requires an isolated agent workspace")
+        if input.subject is not None:
+            raise OSError("RunSubject injection requires an isolated agent workspace")
         return input.workspace
     workspace = input.agent_workspace_root / case.id
     workspace.mkdir(parents=True, exist_ok=False)
     if input.schema_file is not None:
         shutil.copyfile(input.schema_file, workspace / "schema.sql")
-    if input.candidate is not None:
-        candidate_directory = workspace / "candidate"
-        candidate_directory.mkdir()
-        (candidate_directory / "SKILL.md").write_bytes(input.candidate.skill_bytes)
-    elif input.candidate_file is not None:
-        candidate_directory = workspace / "candidate"
-        candidate_directory.mkdir()
-        shutil.copyfile(input.candidate_file, candidate_directory / input.candidate_file.name)
+    if input.subject is not None:
+        subject_directory = workspace / "subject"
+        subject_directory.mkdir()
+        (subject_directory / input.subject.filename).write_bytes(input.subject.content)
     context_files = input.context_files_for(case.id)
     if context_files:
         context_directory = workspace / "context"
         context_directory.mkdir()
         for index, source in enumerate(context_files, start=1):
             shutil.copyfile(source, context_directory / f"{index:02d}-{source.name}")
-    candidate_task_instruction = (
-        "First read `candidate/SKILL.md` and follow its applicable guidance. It is a text "
+    subject_task_instruction = (
+        f"First read `subject/{input.subject.filename}` and follow its applicable guidance. "
+        "It is a text "
         "artifact only: do not execute, import, or load any code it mentions.\n\n"
-        if input.candidate is not None
+        if input.subject is not None
         else ""
     )
     (workspace / "TASK.md").write_text(
         "# SQL evaluation task\n\n"
-        + candidate_task_instruction
+        + subject_task_instruction
         + "Use the supplied prompt. `schema.sql` and `context/` contain the only task context. "
         "The expected query and evaluator inputs are intentionally not present.\n",
         encoding="utf-8",

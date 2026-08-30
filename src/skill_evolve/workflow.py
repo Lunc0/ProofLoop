@@ -9,6 +9,7 @@ from typing import Any
 
 from skill_evolve.attribution.core import Attribution, RunStatus, attribute, eval_data_failure
 from skill_evolve.candidate.contracts import ResolvedCandidate
+from skill_evolve.candidate.subject import subject_from_candidate
 from skill_evolve.config.loader import ResolvedManifest, load_manifest
 from skill_evolve.config.models import CaseConfig
 from skill_evolve.evaluator.core import CaseEvaluation, evaluate_case
@@ -148,17 +149,15 @@ def _run_runner(
 ) -> RunnerExecution:
     if resolved.fake_output is not None:
         run.write_bytes("raw/runner-output.json", resolved.fake_output.read_bytes())
+    subject = subject_from_candidate(candidate) if candidate is not None else None
     input = RunInput(
         run_id=run.run_id,
         workspace=resolved.workspace,
         environment_fingerprint=snapshot.fingerprint,
-        candidate_ref=(
-            candidate.candidate_id if candidate is not None else resolved.manifest.candidate.ref
-        ),
+        subject_ref=subject.subject_id if subject is not None else None,
         cases=selected_cases,
         schema_file=resolved.schema_file,
-        candidate_file=resolved.candidate_digest_file,
-        candidate=candidate,
+        subject=subject,
         case_context_files=resolved.case_context_files,
         agent_workspace_root=run.path / "agent-workspace",
         database_access=database_access,

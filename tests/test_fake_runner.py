@@ -18,7 +18,7 @@ def _run_input(tmp_path) -> RunInput:
         run_id="run-123",
         workspace=resolved.workspace,
         environment_fingerprint="f" * 64,
-        candidate_ref=None,
+        subject_ref=None,
         cases=resolved.manifest.cases,
     )
 

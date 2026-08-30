@@ -14,6 +14,7 @@ import yaml
 
 from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.loader import ResolvedManifest
+from skill_evolve.subject import RunSubject
 
 
 class RunNotFoundError(FileNotFoundError):
@@ -88,6 +89,12 @@ class RunDirectory:
 
         self.write_bytes("inputs/candidate-SKILL.md", candidate.skill_bytes)
         self.write_json("inputs/candidate.json", candidate.public_binding())
+
+    def materialise_subject(self, subject: RunSubject) -> None:
+        """Retain generic evaluated bytes without candidate-store provenance."""
+
+        self.write_bytes(f"inputs/subject-{subject.filename}", subject.content)
+        self.write_json("inputs/subject.json", subject.public_binding())
 
     def _destination(self, relative_path: str) -> Path:
         destination = (self.path / relative_path).resolve()

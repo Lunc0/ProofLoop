@@ -10,6 +10,7 @@ from skill_evolve.candidate.contracts import (
 )
 from skill_evolve.candidate.service import CandidateService
 from skill_evolve.candidate.store import CandidateStoreError, LocalCandidateStore
+from skill_evolve.candidate.subject import subject_from_candidate
 
 __all__ = [
     "CandidateMetadata",
@@ -21,4 +22,5 @@ __all__ = [
     "ExternalSource",
     "LocalCandidateStore",
     "ResolvedCandidate",
+    "subject_from_candidate",
 ]

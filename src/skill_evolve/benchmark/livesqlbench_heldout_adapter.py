@@ -21,10 +21,10 @@ from skill_evolve.benchmark.livesqlbench_heldout_run import (
     HeldOutLiveSQLBenchRunError,
     run_heldout_dsh_suite,
 )
-from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig
 from skill_evolve.runner.contracts import RunnerOutput
 from skill_evolve.sql import LiveSQLBenchFixture, LiveSQLBenchFixtureError
+from skill_evolve.subject import RunSubject
 
 _EVALUATOR_VERSION = "livesqlbench-base-lite-soft-ex-v1"
 
@@ -34,7 +34,11 @@ class LiveSQLBenchBaseLiteHeldOutAdapter:
 
     adapter_id: str = LIVE_SQL_BENCH_BASE_LITE_HELDOUT_ADAPTER_ID
 
-    def load_suite(self, data_root: Path) -> HeldOutLiveSQLBenchSuite:
+    def load_suite(
+        self, data_root: Path, manifest_id: str | None = None
+    ) -> HeldOutLiveSQLBenchSuite:
+        if manifest_id is not None:
+            raise BenchmarkAdapterError("held-out adapter does not accept --manifest")
         try:
             return load_heldout_suite(
                 data_root,
@@ -86,14 +90,14 @@ class LiveSQLBenchBaseLiteHeldOutAdapter:
         profile_patch: Path | None,
         model: ModelConfig,
         runs_root: Path,
-        candidate: ResolvedCandidate | None = None,
+        subject: RunSubject | None = None,
     ) -> BenchmarkRunResult:
         """Run only below custody; the ordinary workspace run root is intentionally ignored."""
 
         del runs_root
         try:
             outcome = run_heldout_dsh_suite(
-                _suite(suite), dsh_config, profile_patch, model, candidate
+                _suite(suite), dsh_config, profile_patch, model, subject
             )
         except HeldOutLiveSQLBenchRunError as error:
             raise BenchmarkAdapterError(str(error)) from error
