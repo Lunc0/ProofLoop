@@ -1,4 +1,4 @@
-"""v2 optimizer-facing projection: direct dependencies, not business semantics."""
+"""v3 optimizer-facing projection: bounded episodes, not business semantics."""
 
 from __future__ import annotations
 
@@ -88,37 +88,41 @@ def test_sql_readonly_powershell_command_is_extracted_conservatively(tmp_path: P
     assert evidence.detail["qualified_columns"] == ["ORDERS.PRICE"]
 
 
-def test_v2_projection_selects_direct_context_and_keeps_failure_chain(tmp_path: Path) -> None:
+def test_v3_projection_selects_context_and_keeps_failure_episode(tmp_path: Path) -> None:
     case = _case(tmp_path)
+    subject = _subject()
     session = _jsonl(
         _header(),
-        _tool_call(1, 1, 1, "discover", "glob", '{"pattern":"*.sql"}'),
-        _tool_result(2, 1, 1, "discover", "ok", meta={"paths": ["schema.sql", "notes.sql"]}),
-        _tool_call(3, 1, 2, "read-schema", "read", '{"path":"schema.sql"}'),
-        _tool_result(4, 1, 2, "read-schema", "schema loaded"),
-        _assistant(5, 1, 3, "Use IRS and inspect price."),
-        _tool_call(6, 1, 4, "bad-query", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
-        _tool_result(7, 1, 4, "bad-query", "multiple SQL statements are not allowed"),
+        _tool_call(1, 1, 1, "read-skill", "read", '{"path":"subject/SKILL.md"}'),
+        _tool_result(2, 1, 1, "read-skill", subject.content.decode("utf-8")),
+        _tool_call(3, 1, 2, "discover", "glob", '{"pattern":"*.sql"}'),
+        _tool_result(4, 1, 2, "discover", "ok", meta={"paths": ["schema.sql", "notes.sql"]}),
+        _tool_call(5, 1, 3, "read-schema", "read", '{"path":"schema.sql"}'),
+        _tool_result(6, 1, 3, "read-schema", "schema loaded"),
+        _assistant(7, 1, 4, "Use IRS and inspect price."),
+        _tool_call(8, 1, 5, "bad-query", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+        _tool_result(9, 1, 5, "bad-query", "multiple SQL statements are not allowed"),
+        _assistant(10, 1, 6, "I will use one statement."),
         _tool_call(
-            8,
+            11,
             1,
-            5,
+            7,
             "sample",
             "sql-readonly",
             '{"query":"SELECT o.price FROM orders AS o WHERE o.active = true LIMIT 20"}',
         ),
-        _tool_result(9, 1, 5, "sample", '{"columns":["price"],"rows":[[10],[20],[30]]}'),
+        _tool_result(12, 1, 7, "sample", '{"columns":["price"],"rows":[[10],[20],[30]]}'),
         _tool_call(
-            10,
+            13,
             1,
-            6,
+            8,
             "aggregate",
             "sql-readonly",
             '{"query":"SELECT MIN(o.price), MAX(o.price) FROM orders AS o WHERE o.active = true"}',
         ),
-        _tool_result(11, 1, 6, "aggregate", '{"columns":["min","max"],"rows":[[10,30]]}'),
-        _assistant(12, 1, 7, "I will submit one query."),
-        _turn_end(13, 1),
+        _tool_result(14, 1, 8, "aggregate", '{"columns":["min","max"],"rows":[[10,30]]}'),
+        _assistant(15, 1, 9, "I will submit one query."),
+        _turn_end(16, 1),
     )
     trajectory = compress_session_jsonl(
         session,
@@ -134,29 +138,49 @@ def test_v2_projection_selects_direct_context_and_keeps_failure_chain(tmp_path: 
     )
 
     projection = build_evolution_agent_input(
-        "custody-manifest", "test-environment", _subject(), ((case, trajectory),)
+        "custody-manifest", "test-environment", subject, ((case, trajectory),)
     )
     payload = canonical_json_bytes(projection.model_dump(mode="json")).decode("utf-8")
     projected_case = projection.trajectories[0]
 
-    assert projection.schema_version == "evolution-coding-agent-input-v2"
-    assert "sha256" not in payload
+    assert projection.schema_version == "evolution-coding-agent-input-v3"
+    assert projection.evaluated_skill.content_sha256 == hashlib.sha256(
+        projection.skill.encode("utf-8")
+    ).hexdigest()
+    assert "redacted_session_sha256" not in payload
     assert "PRIVATE GOLD" not in payload
-    assert "seq" not in payload
+    assert '"seq":' not in payload
     assert "workspace_discovery" in {evidence.kind for evidence in projected_case.evidence}
-    failure = next(
-        evidence for evidence in projected_case.evidence if evidence.kind == "tool_failure"
-    )
-    assert failure.priority == "P0"
-    assert failure.detail["later_same_tool_success"] is True
-    sample = next(
+    assert "public_assistant_statement" not in {
+        evidence.kind for evidence in projected_case.evidence
+    }
+    episode = next(
         evidence
         for evidence in projected_case.evidence
-        if evidence.kind == "sql_query" and "LIMIT 20" in evidence.detail["query"]
+        if evidence.kind == "failure_recovery_episode"
     )
+    assert episode.priority == "P0"
+    assert episode.pre_failure_public_context == "Use IRS and inspect price."
+    assert episode.post_failure_public_context == "I will use one statement."
+    assert episode.failed_action.detail["direct_failure"] == {
+        "category": "invalid_request",
+        "cause": "multiple_sql_statements",
+    }
+    assert episode.recovery_observation == "first_subsequent_success_observed"
+    assert len(episode.post_failure_actions) == 1
+    sample = episode.post_failure_actions[0]
+    assert sample.kind == "sql_query"
     assert sample.detail["coverage"] == "covered"
     assert sample.detail["covered_fields"] == ["ORDERS.PRICE"]
     assert "sample" not in sample.detail["result"]
+    assert episode.skill_access.occurred_before_failure == "observed"
+    assert episode.skill_access.subject_match == "exact"
+    assert episode.skill_access.rule_excerpt is not None
+    assert "multiple SQL statements" in episode.skill_access.rule_excerpt.text
+    assert episode.skill_access.rule_excerpt.selection_basis == (
+        "adapter_and_direct_failure_cause:sql-readonly:multiple_sql_statements"
+    )
+    assert len(canonical_json_bytes(episode.model_dump(mode="json"))) <= 4_096
     assert projected_case.candidate_output.sql is None
     assert projected_case.final_submission_attempt is not None
     assert projected_case.final_submission_attempt.extraction_status == "runner_rejected"
@@ -168,6 +192,208 @@ def test_v2_projection_selects_direct_context_and_keeps_failure_chain(tmp_path: 
     assert selected_context["knowledge"].selection == "direct_reference"
     assert '"IRS"' in selected_context["knowledge"].text
     assert '"UNUSED"' not in selected_context["knowledge"].text
+
+
+def test_v3_failure_episode_uses_result_boundary_and_strict_step_context(
+    tmp_path: Path,
+) -> None:
+    case = _case(tmp_path)
+    subject = _subject()
+    projected_case = _projected_case(
+        case,
+        subject,
+        _jsonl(
+            _header(),
+            _assistant(1, 1, 1, "Known before the failed call."),
+            _tool_call(2, 1, 2, "bad", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+            _assistant(3, 1, 2, "This shares the call step and is not pre-context."),
+            _tool_call(4, 1, 3, "already-started", "sql-readonly", '{"query":"SELECT 3"}'),
+            _tool_result(5, 1, 4, "bad", "multiple SQL statements are not allowed"),
+            _assistant(6, 1, 4, "This shares the result step and is not post-context."),
+            _tool_result(7, 1, 4, "already-started", '{"columns":["value"],"rows":[[3]]}'),
+            _tool_call(8, 1, 5, "recovery", "sql-readonly", '{"query":"SELECT 4"}'),
+            _tool_result(9, 1, 5, "recovery", '{"columns":["value"],"rows":[[4]]}'),
+            _assistant(10, 1, 6, "Confirmed after the error result."),
+            _turn_end(11, 1),
+        ),
+        runner_outcome="completed",
+    )
+    episode = _failure_episode(projected_case)
+
+    assert episode.pre_failure_public_context == "Known before the failed call."
+    assert episode.post_failure_public_context == "Confirmed after the error result."
+    assert len(episode.post_failure_actions) == 1
+    assert episode.post_failure_actions[0].detail["query"] == "SELECT 4"
+    assert episode.recovery_observation == "first_subsequent_success_observed"
+
+
+def test_v3_skill_rule_excerpt_requires_the_failed_adapter(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    content = b"# SQL skill\n\nDo not send multiple SQL statements to archive-sql.\n"
+    subject = RunSubject(
+        subject_id="subject",
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        content=content,
+    )
+    projected_case = _projected_case(
+        case,
+        subject,
+        _jsonl(
+            _header(),
+            _tool_call(1, 1, 1, "read-skill", "read", '{"path":"subject/SKILL.md"}'),
+            _tool_result(2, 1, 1, "read-skill", content.decode("utf-8")),
+            _tool_call(3, 1, 2, "bad", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+            _tool_result(4, 1, 2, "bad", "multiple SQL statements are not allowed"),
+            _assistant(5, 1, 3, "Stop."),
+            _turn_end(6, 1),
+        ),
+        runner_outcome="completed",
+    )
+    episode = _failure_episode(projected_case)
+
+    assert episode.skill_access.occurred_before_failure == "observed"
+    assert episode.skill_access.subject_match == "exact"
+    assert episode.skill_access.rule_excerpt is None
+
+
+def test_v3_skill_access_degrades_conservatively(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    subject = _subject()
+    declared_path = _projected_case(
+        case,
+        subject,
+        _jsonl(
+            _header(),
+            _tool_call(1, 1, 1, "read-skill", "read", '{"path":"subject/SKILL.md"}'),
+            _tool_result(2, 1, 1, "read-skill", "partial Skill output"),
+            _assistant(3, 1, 2, "Try a query."),
+            _tool_call(4, 1, 3, "bad", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+            _tool_result(5, 1, 3, "bad", "multiple SQL statements are not allowed"),
+            _assistant(6, 1, 4, "Stop."),
+            _turn_end(7, 1),
+        ),
+        runner_outcome="completed",
+    )
+    declared_episode = _failure_episode(declared_path)
+    assert declared_episode.skill_access.occurred_before_failure == "observed"
+    assert declared_episode.skill_access.subject_match == "declared_subject_path"
+
+    complete_without_read = _projected_case(
+        case,
+        subject,
+        _jsonl(
+            _header(),
+            _assistant(1, 1, 1, "Try a query."),
+            _tool_call(2, 1, 2, "bad", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+            _tool_result(3, 1, 2, "bad", "multiple SQL statements are not allowed"),
+            _assistant(4, 1, 3, "Stop."),
+            _turn_end(5, 1),
+        ),
+        runner_outcome="completed",
+    )
+    complete_episode = _failure_episode(complete_without_read)
+    assert complete_episode.skill_access.occurred_before_failure == "not_observed"
+    assert complete_episode.skill_access.subject_match == "unknown"
+
+    partial_without_read = _projected_case(
+        case,
+        subject,
+        _jsonl(
+            _header(),
+            _assistant(1, 1, 1, "Try a query."),
+            _tool_call(2, 1, 2, "bad", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+            _tool_result(3, 1, 2, "bad", "multiple SQL statements are not allowed"),
+        ),
+        runner_outcome="timeout",
+    )
+    partial_episode = _failure_episode(partial_without_read)
+    assert partial_episode.skill_access.occurred_before_failure == "unknown"
+    assert partial_episode.skill_access.subject_match == "unknown"
+
+
+def test_v3_failure_episode_stops_before_a_new_failure(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    projected_case = _projected_case(
+        case,
+        _subject(),
+        _jsonl(
+            _header(),
+            _assistant(1, 1, 1, "Try a query."),
+            _tool_call(2, 1, 2, "first", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+            _tool_result(3, 1, 2, "first", "multiple SQL statements are not allowed"),
+            _tool_call(4, 1, 3, "second", "sql-readonly", '{"query":"SELECT 3; SELECT 4"}'),
+            _tool_result(5, 1, 3, "second", "multiple SQL statements are not allowed"),
+            _tool_call(6, 1, 4, "success", "sql-readonly", '{"query":"SELECT 5"}'),
+            _tool_result(7, 1, 4, "success", '{"columns":["value"],"rows":[[5]]}'),
+            _assistant(8, 1, 5, "Done."),
+            _turn_end(9, 1),
+        ),
+        runner_outcome="completed",
+    )
+    episodes = [
+        evidence
+        for evidence in projected_case.evidence
+        if evidence.kind == "failure_recovery_episode"
+    ]
+
+    assert len(episodes) == 2
+    assert episodes[0].post_failure_actions == ()
+    assert episodes[0].recovery_observation == "no_success_observed"
+    assert len(episodes[1].post_failure_actions) == 1
+    assert episodes[1].post_failure_actions[0].outcome == "succeeded"
+
+
+def test_v3_failure_episode_enforces_total_budget(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    queries = ["SELECT '" + ("x" * 180) + "'" for _ in range(20)]
+    projected_case = _projected_case(
+        case,
+        _subject(),
+        _jsonl(
+            _header(),
+            _assistant(1, 1, 1, "Search."),
+            _tool_call(
+                2,
+                1,
+                2,
+                "oversized",
+                "web_search",
+                json.dumps({"queries": queries}),
+            ),
+            _tool_result(3, 1, 2, "oversized", "request rejected", is_error=True),
+            _assistant(4, 1, 3, "Stop."),
+            _turn_end(5, 1),
+        ),
+        runner_outcome="completed",
+    )
+    episode = _failure_episode(projected_case)
+
+    assert len(canonical_json_bytes(episode.model_dump(mode="json"))) <= 4_096
+    assert episode.failed_action.detail["tool"] == "web_search"
+    assert episode.failed_action.detail["direct_failure"]["cause"] == "tool_result_is_error"
+    assert len(episode.failed_action.detail["action"]["queries"]) <= 2
+
+
+def _projected_case(
+    case: LiveSQLBenchCase, subject: RunSubject, session: bytes, *, runner_outcome: str
+):
+    trajectory = compress_session_jsonl(
+        session,
+        RunnerCaseOutput(case_id=case.instance_id, status="completed", trajectory=()),
+        _evaluation(case.instance_id),
+        runner_outcome=runner_outcome,
+    )
+    return build_evolution_agent_input(
+        "custody-manifest", "test-environment", subject, ((case, trajectory),)
+    ).trajectories[0]
+
+
+def _failure_episode(projected_case):
+    return next(
+        evidence
+        for evidence in projected_case.evidence
+        if evidence.kind == "failure_recovery_episode"
+    )
 
 
 def _case(tmp_path: Path) -> LiveSQLBenchCase:
@@ -219,7 +445,7 @@ def _evaluation(case_id: str) -> CaseEvaluation:
 
 
 def _subject() -> RunSubject:
-    content = b"# skill\n"
+    content = b"# SQL skill\n\nDo not send multiple SQL statements to sql-readonly.\n"
     return RunSubject(
         subject_id="subject",
         content_sha256=hashlib.sha256(content).hexdigest(),
@@ -267,6 +493,7 @@ def _tool_result(
     text: str,
     *,
     meta: dict[str, object] | None = None,
+    is_error: bool = False,
 ) -> dict[str, object]:
     data: dict[str, object] = {
         "turn": turn,
@@ -277,7 +504,7 @@ def _tool_result(
                     "type": "tool-result",
                     "toolCallId": call_id,
                     "content": [{"type": "text", "text": text}],
-                    "isError": False,
+                    "isError": is_error,
                 }
             ]
         },

@@ -1,7 +1,8 @@
-"""Build bounded v2 Evolution inputs for a future Coding Agent invocation."""
+"""Build bounded v3 Evolution inputs for a future Coding Agent invocation."""
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -14,8 +15,9 @@ from skill_evolve.trajectory.compressor import (
 )
 from skill_evolve.trajectory.contracts import (
     CompressedTrajectory,
-    EvolutionAgentInputV2,
-    EvolutionProjectionCase,
+    EvaluatedSkill,
+    EvolutionAgentInputV3,
+    EvolutionProjectionCaseV3,
 )
 from skill_evolve.trajectory.policy import DEFAULT_COMPRESSOR_POLICY, CompressorPolicy
 from skill_evolve.trajectory.projection import (
@@ -23,7 +25,7 @@ from skill_evolve.trajectory.projection import (
     project_candidate_output,
     project_context,
     project_evaluation,
-    project_evidence,
+    project_evidence_v3,
     project_final_submission_attempt,
 )
 
@@ -42,8 +44,8 @@ def build_evolution_agent_input(
     omitted_cases: tuple[dict[str, str], ...] = (),
     *,
     policy: CompressorPolicy = DEFAULT_COMPRESSOR_POLICY,
-) -> EvolutionAgentInputV2:
-    """Assemble only failed-case v2 evidence without model invocation.
+) -> EvolutionAgentInputV3:
+    """Assemble only failed-case v3 evidence without model invocation.
 
     ``manifest_sha256`` is validated at the custody boundary but intentionally
     omitted from the optimizer-facing payload.  ``omitted_cases`` remains an
@@ -62,12 +64,19 @@ def build_evolution_agent_input(
     skill = _bounded_text(skill_text, policy.max_skill_bytes)
     if len(_safe_text(skill_text).encode("utf-8")) > policy.max_skill_bytes:
         raise TrajectoryCompressionError("evaluated Skill exceeds agent-input size limit")
+    evaluated_skill = EvaluatedSkill(
+        subject_id=subject.subject_id,
+        content_sha256=hashlib.sha256(skill.encode("utf-8")).hexdigest(),
+    )
     ordered_cases = sorted(cases, key=_case_sort_key)
-    agent_cases = tuple(_case_input(case, trajectory, policy) for case, trajectory in ordered_cases)
-    agent_input = EvolutionAgentInputV2(
+    agent_cases = tuple(
+        _case_input(case, trajectory, evaluated_skill, skill, policy)
+        for case, trajectory in ordered_cases
+    )
+    agent_input = EvolutionAgentInputV3(
         projection_rule_version=policy.projection_rule_version,
         environment_fingerprint=environment_fingerprint,
-        subject_id=subject.subject_id,
+        evaluated_skill=evaluated_skill,
         skill=skill,
         trajectories=agent_cases,
     )
@@ -82,8 +91,12 @@ def _case_sort_key(item: tuple[LiveSQLBenchCase, CompressedTrajectory]) -> str:
 
 
 def _case_input(
-    case: LiveSQLBenchCase, trajectory: CompressedTrajectory, policy: CompressorPolicy
-) -> EvolutionProjectionCase:
+    case: LiveSQLBenchCase,
+    trajectory: CompressedTrajectory,
+    evaluated_skill: EvaluatedSkill,
+    skill: str,
+    policy: CompressorPolicy,
+) -> EvolutionProjectionCaseV3:
     if case.instance_id != trajectory.evaluation.case_id:
         raise TrajectoryCompressionError("case and trajectory identifiers do not match")
     if trajectory.evaluation.verdict == "pass":
@@ -92,13 +105,13 @@ def _case_input(
         _public_context_source(role, path, policy)
         for role, path in zip(_CONTEXT_ROLES, case.public_context_files, strict=True)
     )
-    return EvolutionProjectionCase(
+    return EvolutionProjectionCaseV3(
         case_id=case.instance_id,
         prompt=_bounded_text(case.prompt, policy.max_prompt_bytes),
         task_contract=task_contract(True, subject_path="SKILL.md"),
         difficulty_tier=case.difficulty_tier,
         context=project_context(sources, trajectory, policy),
-        evidence=project_evidence(trajectory, policy),
+        evidence=project_evidence_v3(trajectory, skill, policy),
         candidate_output=project_candidate_output(trajectory),
         final_submission_attempt=project_final_submission_attempt(trajectory, policy),
         evaluation=project_evaluation(trajectory, policy),

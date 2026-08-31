@@ -12,7 +12,7 @@ class CompressorPolicy:
     """All behaviour that can affect a compressed trajectory's bytes."""
 
     rule_version: str = "dsh-trajectory-compressor-v1"
-    projection_rule_version: str = "evolution-projection-v2"
+    projection_rule_version: str = "evolution-projection-v3.1"
     max_events: int = 10_000
     max_assistant_text_bytes: int = 4_096
     max_tool_arguments_bytes: int = 4_096
@@ -27,6 +27,11 @@ class CompressorPolicy:
     max_projection_text_bytes: int = 2_048
     max_projection_evidence: int = 80
     max_selected_context_records: int = 12
+    max_failure_episode_context_bytes: int = 512
+    max_failure_episode_action_text_bytes: int = 768
+    max_failure_episode_actions: int = 3
+    max_failure_episode_bytes: int = 4_096
+    max_skill_rule_excerpt_bytes: int = 512
     max_list_items: int = 20
     high_tool_call_count: int = 12
     high_total_tokens: int = 20_000
@@ -45,6 +50,11 @@ class CompressorPolicy:
             "max_projection_text_bytes",
             "max_projection_evidence",
             "max_selected_context_records",
+            "max_failure_episode_context_bytes",
+            "max_failure_episode_action_text_bytes",
+            "max_failure_episode_actions",
+            "max_failure_episode_bytes",
+            "max_skill_rule_excerpt_bytes",
         ):
             values.pop(key)
 

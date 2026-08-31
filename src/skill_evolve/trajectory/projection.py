@@ -5,19 +5,24 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
-from skill_evolve.trajectory.compressor import _safe_text
+from skill_evolve.trajectory.compressor import _safe_text, canonical_json_bytes
 from skill_evolve.trajectory.contracts import (
     CompressedToolCall,
     CompressedTrajectory,
+    EpisodeAction,
     EvidenceText,
+    FailureRecoveryEpisode,
     FinalSubmissionAttempt,
     ProjectionCandidateOutput,
     ProjectionContext,
     ProjectionEvaluation,
     ProjectionEvidence,
+    SkillAccessObservation,
+    SkillRuleExcerpt,
+    SourceLocation,
 )
 from skill_evolve.trajectory.dependency import (
     SqlReferences,
@@ -53,6 +58,13 @@ class _SqlAction:
     evidence_index: int
     references: SqlReferences
     status: str
+
+
+@dataclass(frozen=True)
+class _ObservedCall:
+    call: CompressedToolCall
+    step_index: int
+    pre_failure_public_context: str | None
 
 
 def project_context(
@@ -139,6 +151,372 @@ def project_evidence(
     )
 
 
+def project_evidence_v3(
+    trajectory: CompressedTrajectory,
+    skill_text: str,
+    policy: CompressorPolicy,
+) -> tuple[ProjectionEvidence | FailureRecoveryEpisode, ...]:
+    """Build bounded P0 failure episodes without exposing custody locations."""
+
+    observed_calls = _observed_calls(trajectory)
+    calls = tuple(observed.call for observed in observed_calls)
+    episode_policy = replace(
+        policy, max_projection_text_bytes=policy.max_failure_episode_action_text_bytes
+    )
+    drafts = [
+        _project_call(
+            observed.call,
+            _has_later_successful_read(calls[index + 1 :]),
+            False,
+            episode_policy,
+            include_later_same_adapter_success=False,
+        )
+        for index, observed in enumerate(observed_calls)
+    ]
+    sql_actions = [
+        _SqlAction(
+            evidence_index=index,
+            references=extract_sql_references(query),
+            status=observed.call.status,
+        )
+        for index, observed in enumerate(observed_calls)
+        if observed.call.adapter == "sql-readonly"
+        if (query := _sql_query(observed.call)) is not None
+    ]
+    _apply_sample_coverage(drafts, sql_actions)
+    subject_read_indices = {
+        index
+        for index, observed in enumerate(observed_calls)
+        if _subject_read_match(observed.call, skill_text) != "unknown"
+    }
+
+    items: list[tuple[int, ProjectionEvidence | FailureRecoveryEpisode]] = []
+    if trajectory.trace.trace_completeness != "complete":
+        items.append(
+            (
+                -1,
+                ProjectionEvidence(
+                    kind="trace_state",
+                    priority="P0",
+                    outcome="unknown",
+                    detail={
+                        "trace_completeness": trajectory.trace.trace_completeness,
+                        "runner_outcome": trajectory.trace.runner_outcome,
+                        "missing_terminal_events": list(trajectory.trace.missing_terminal_events),
+                    },
+                ),
+            )
+        )
+
+    claimed_post_failure_actions: set[int] = set()
+    for index, observed in enumerate(observed_calls):
+        if _is_failure(observed.call):
+            episode, claimed = _failure_recovery_episode(
+                index,
+                observed_calls,
+                drafts,
+                trajectory,
+                skill_text,
+                policy,
+            )
+            claimed_post_failure_actions.update(claimed)
+            items.append((index, episode))
+        elif (
+            index not in claimed_post_failure_actions and index not in subject_read_indices
+        ):
+            items.append((index, _as_projection_evidence(drafts[index])))
+
+    return tuple(_select_v3_evidence(items, policy))
+
+
+def _observed_calls(trajectory: CompressedTrajectory) -> tuple[_ObservedCall, ...]:
+    last_public_context: str | None = None
+    observed: list[_ObservedCall] = []
+    for step_index, step in enumerate(trajectory.trajectory):
+        observed.extend(
+            _ObservedCall(
+                call=call,
+                step_index=step_index,
+                pre_failure_public_context=last_public_context,
+            )
+            for call in step.tool_calls
+        )
+        if step.public_assistant_text:
+            last_public_context = step.public_assistant_text[-1].text
+    return tuple(observed)
+
+
+def _failure_recovery_episode(
+    failure_index: int,
+    observed_calls: tuple[_ObservedCall, ...],
+    drafts: list[dict[str, Any]],
+    trajectory: CompressedTrajectory,
+    skill_text: str,
+    policy: CompressorPolicy,
+) -> tuple[FailureRecoveryEpisode, set[int]]:
+    failed = observed_calls[failure_index]
+    post_failure_indices, recovery_observation = _post_failure_window(
+        failure_index, observed_calls, policy
+    )
+    episode = FailureRecoveryEpisode(
+        pre_failure_public_context=_bounded_context(
+            failed.pre_failure_public_context, policy
+        ),
+        failed_action=_as_episode_action(drafts[failure_index]),
+        post_failure_public_context=_bounded_context(
+            _post_failure_public_context(trajectory, failed.call.result), policy
+        ),
+        post_failure_actions=tuple(
+            _as_episode_action(drafts[index]) for index in post_failure_indices
+        ),
+        recovery_observation=recovery_observation,
+        skill_access=_skill_access_before_failure(
+            observed_calls[:failure_index],
+            trajectory,
+            skill_text,
+            failed.call,
+            policy,
+        ),
+    )
+    return _fit_episode(episode, policy), set(post_failure_indices)
+
+
+def _post_failure_window(
+    failure_index: int,
+    observed_calls: tuple[_ObservedCall, ...],
+    policy: CompressorPolicy,
+) -> tuple[tuple[int, ...], Literal[
+    "first_subsequent_success_observed", "no_success_observed", "truncated_before_success"
+]]:
+    failure_result = observed_calls[failure_index].call.result
+    if failure_result is None:
+        return (), "no_success_observed"
+    selected: list[int] = []
+    for index in range(failure_index + 1, len(observed_calls)):
+        call = observed_calls[index].call
+        if not _definitely_after(call.call, failure_result):
+            continue
+        if _is_failure(call):
+            return tuple(selected), "no_success_observed"
+        selected.append(index)
+        if call.status == "succeeded":
+            return tuple(selected), "first_subsequent_success_observed"
+        if len(selected) >= policy.max_failure_episode_actions:
+            return tuple(selected), "truncated_before_success"
+    return tuple(selected), "no_success_observed"
+
+
+def _post_failure_public_context(
+    trajectory: CompressedTrajectory, failure_result: SourceLocation | None
+) -> str | None:
+    if failure_result is None or failure_result.turn is None or failure_result.step is None:
+        return None
+    failure_step = (failure_result.turn, failure_result.step)
+    for step in trajectory.trajectory:
+        if (step.turn, step.step) > failure_step and step.public_assistant_text:
+            return step.public_assistant_text[0].text
+    return None
+
+
+def _definitely_after(location: SourceLocation, boundary: SourceLocation) -> bool:
+    """Return only order that the compressed source makes unambiguous."""
+
+    if (
+        location.turn is None
+        or location.step is None
+        or boundary.turn is None
+        or boundary.step is None
+    ):
+        return False
+    return (location.turn, location.step, location.seq) > (
+        boundary.turn,
+        boundary.step,
+        boundary.seq,
+    )
+
+
+def _skill_access_before_failure(
+    prior_calls: tuple[_ObservedCall, ...],
+    trajectory: CompressedTrajectory,
+    skill_text: str,
+    failed_call: CompressedToolCall,
+    policy: CompressorPolicy,
+) -> SkillAccessObservation:
+    matches = [
+        _subject_read_match(observed.call, skill_text)
+        for observed in prior_calls
+        if observed.call.adapter == "read" and observed.call.status == "succeeded"
+    ]
+    if "exact" in matches:
+        subject_match: Literal["exact", "declared_subject_path", "unknown"] = "exact"
+        occurred: Literal["observed", "not_observed", "unknown"] = "observed"
+    elif "declared_subject_path" in matches:
+        subject_match = "declared_subject_path"
+        occurred = "observed"
+    else:
+        subject_match = "unknown"
+        occurred = (
+            "not_observed" if trajectory.trace.trace_completeness == "complete" else "unknown"
+        )
+    rule_excerpt = (
+        _skill_rule_excerpt(skill_text, failed_call, policy) if occurred == "observed" else None
+    )
+    return SkillAccessObservation(
+        occurred_before_failure=occurred,
+        subject_match=subject_match,
+        rule_excerpt=rule_excerpt,
+    )
+
+
+def _subject_read_match(
+    call: CompressedToolCall, skill_text: str
+) -> Literal["exact", "declared_subject_path", "unknown"]:
+    if (
+        call.output is not None
+        and not call.output.truncated
+        and call.output.text == skill_text
+    ):
+        return "exact"
+    target = _summary_text(call.summary.get("target"))
+    if target is None:
+        return "unknown"
+    normalised = target.replace("\\", "/").casefold().strip("/")
+    if normalised in {"subject/skill.md", "workspace/subject/skill.md"}:
+        return "declared_subject_path"
+    return "unknown"
+
+
+def _skill_rule_excerpt(
+    skill_text: str, failed_call: CompressedToolCall, policy: CompressorPolicy
+) -> SkillRuleExcerpt | None:
+    direct_failure = failed_call.direct_failure
+    if direct_failure is None:
+        return None
+    phrase = _normalise_constraint_text(direct_failure.direct_cause)
+    adapter = _normalise_constraint_text(failed_call.adapter)
+    if len(phrase) < 4 or len(adapter) < 3:
+        return None
+    for paragraph in re.split(r"\r?\n\s*\r?\n", skill_text):
+        normalised_paragraph = _normalise_constraint_text(paragraph)
+        if phrase in normalised_paragraph and adapter in normalised_paragraph:
+            return SkillRuleExcerpt(
+                text=_limit(paragraph, policy.max_skill_rule_excerpt_bytes),
+                selection_basis=(
+                    "adapter_and_direct_failure_cause:"
+                    f"{failed_call.adapter}:{direct_failure.direct_cause}"
+                ),
+            )
+    return None
+
+
+def _normalise_constraint_text(value: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+
+def _fit_episode(
+    episode: FailureRecoveryEpisode, policy: CompressorPolicy
+) -> FailureRecoveryEpisode:
+    fitted = episode
+    while _episode_bytes(fitted) > policy.max_failure_episode_bytes and fitted.post_failure_actions:
+        actions = fitted.post_failure_actions[:-1]
+        observation = fitted.recovery_observation
+        if observation == "first_subsequent_success_observed":
+            observation = "truncated_before_success"
+        fitted = fitted.model_copy(
+            update={"post_failure_actions": actions, "recovery_observation": observation}
+        )
+    if _episode_bytes(fitted) > policy.max_failure_episode_bytes:
+        fitted = fitted.model_copy(update={"post_failure_public_context": None})
+    if _episode_bytes(fitted) > policy.max_failure_episode_bytes:
+        fitted = fitted.model_copy(update={"pre_failure_public_context": None})
+    if _episode_bytes(fitted) > policy.max_failure_episode_bytes:
+        fitted = fitted.model_copy(
+            update={"failed_action": _minimal_failure_action(fitted.failed_action, policy)}
+        )
+    return fitted
+
+
+def _episode_bytes(episode: FailureRecoveryEpisode) -> int:
+    return len(canonical_json_bytes(episode.model_dump(mode="json")))
+
+
+def _minimal_failure_action(
+    action: EpisodeAction, policy: CompressorPolicy
+) -> EpisodeAction:
+    detail = action.detail
+    compact: dict[str, Any] = {}
+    tool = detail.get("tool")
+    if isinstance(tool, str):
+        compact["tool"] = _limit(tool, 128)
+    direct_failure = detail.get("direct_failure")
+    if isinstance(direct_failure, dict):
+        compact["direct_failure"] = direct_failure
+    error = detail.get("error")
+    if isinstance(error, str):
+        compact["error"] = _limit(error, policy.max_failure_episode_action_text_bytes // 2)
+    action_parameters = detail.get("action")
+    if isinstance(action_parameters, dict):
+        compact["action"] = _compact_action_parameters(action_parameters, policy)
+    return action.model_copy(update={"detail": compact})
+
+
+def _compact_action_parameters(
+    parameters: dict[str, Any], policy: CompressorPolicy
+) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    value_limit = policy.max_failure_episode_action_text_bytes // 4
+    for key in sorted(parameters)[:3]:
+        value = parameters[key]
+        if isinstance(value, str):
+            compact[key] = _limit(value, value_limit)
+        elif isinstance(value, int):
+            compact[key] = value
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            compact[key] = [_limit(item, value_limit) for item in value[:2]]
+    return compact
+
+
+def _bounded_context(value: str | None, policy: CompressorPolicy) -> str | None:
+    return (
+        _limit(value, policy.max_failure_episode_context_bytes) if value is not None else None
+    )
+
+
+def _is_failure(call: CompressedToolCall) -> bool:
+    return call.status == "failed" or call.direct_failure is not None
+
+
+def _as_episode_action(draft: dict[str, Any]) -> EpisodeAction:
+    return EpisodeAction(
+        kind=draft["kind"], outcome=draft["outcome"], detail=draft["detail"]
+    )
+
+
+def _as_projection_evidence(draft: dict[str, Any]) -> ProjectionEvidence:
+    return ProjectionEvidence(
+        kind=draft["kind"],
+        priority=draft["priority"],
+        outcome=draft["outcome"],
+        detail=draft["detail"],
+    )
+
+
+def _select_v3_evidence(
+    items: list[tuple[int, ProjectionEvidence | FailureRecoveryEpisode]],
+    policy: CompressorPolicy,
+) -> list[ProjectionEvidence | FailureRecoveryEpisode]:
+    order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    ordered = sorted(items, key=lambda item: (order[_item_priority(item[1])], item[0]))
+    required = [item for _, item in ordered if _item_priority(item) == "P0"]
+    optional = [item for _, item in ordered if _item_priority(item) != "P0"]
+    remaining = max(0, policy.max_projection_evidence - len(required))
+    return required + optional[:remaining]
+
+
+def _item_priority(item: ProjectionEvidence | FailureRecoveryEpisode) -> str:
+    return item.priority
+
+
 def project_candidate_output(trajectory: CompressedTrajectory) -> ProjectionCandidateOutput:
     """Expose only the candidate SQL accepted by the runner contract."""
 
@@ -203,9 +581,11 @@ def _project_call(
     later_read: bool,
     later_same_adapter_success: bool,
     policy: CompressorPolicy,
+    *,
+    include_later_same_adapter_success: bool = True,
 ) -> dict[str, Any]:
     if call.status == "failed" or call.direct_failure is not None:
-        detail = {
+        detail: dict[str, Any] = {
             "tool": call.adapter,
             "action": _action_parameters(call, policy),
             "error": _limit(_evidence_value(call.output), policy.max_projection_text_bytes),
@@ -217,8 +597,9 @@ def _project_call(
                 if call.direct_failure is not None
                 else None
             ),
-            "later_same_tool_success": later_same_adapter_success,
         }
+        if include_later_same_adapter_success:
+            detail["later_same_tool_success"] = later_same_adapter_success
         return {"kind": "tool_failure", "priority": "P0", "outcome": "failed", "detail": detail}
 
     if call.adapter == "sql-readonly":

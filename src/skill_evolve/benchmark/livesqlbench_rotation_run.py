@@ -248,7 +248,7 @@ def _write_evolution_agent_input(
         run.write_json(
             "agent-input/manifest.json",
             {
-                "schema_version": "evolution-coding-agent-input-v2",
+                "schema_version": "evolution-coding-agent-input-v3",
                 "exposed_for_optimization": True,
                 "quality": "unavailable",
                 "included_case_count": 0,
@@ -261,7 +261,7 @@ def _write_evolution_agent_input(
     run.write_json(
         "agent-input/manifest.json",
         {
-            "schema_version": "evolution-coding-agent-input-v2",
+            "schema_version": "evolution-coding-agent-input-v3",
             "exposed_for_optimization": True,
             "manifest_sha256": suite.manifest.manifest_sha256,
             "environment_fingerprint": environment_fingerprint,

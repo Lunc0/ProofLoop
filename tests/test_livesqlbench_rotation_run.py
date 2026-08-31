@@ -182,7 +182,7 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     assert agent_input.is_file()
     assert not (smoke.run.path / "agent-input").exists()
     passing_input = json.loads(agent_input.read_text(encoding="utf-8"))
-    assert passing_input["schema_version"] == "evolution-coding-agent-input-v2"
+    assert passing_input["schema_version"] == "evolution-coding-agent-input-v3"
     assert passing_input["trajectories"] == []
     assert "omitted_cases" not in passing_input
 

@@ -232,3 +232,77 @@ class EvolutionAgentInputV2(StrictTrajectoryModel):
     subject_id: str
     skill: str
     trajectories: tuple[EvolutionProjectionCase, ...]
+
+
+class EvaluatedSkill(StrictTrajectoryModel):
+    """Version identity for the exact Skill text included in a v3 payload."""
+
+    subject_id: str
+    content_sha256: str
+
+
+class SkillRuleExcerpt(StrictTrajectoryModel):
+    """A deterministically selected evaluated-Skill paragraph, if available."""
+
+    text: str
+    selection_basis: str
+
+
+class SkillAccessObservation(StrictTrajectoryModel):
+    """Observed relationship between prior read actions and the active Skill."""
+
+    occurred_before_failure: Literal["observed", "not_observed", "unknown"]
+    subject_match: Literal["exact", "declared_subject_path", "unknown"]
+    rule_excerpt: SkillRuleExcerpt | None = None
+
+
+class EpisodeAction(StrictTrajectoryModel):
+    """One observed call/result fact within a bounded failure episode."""
+
+    kind: str
+    outcome: Literal["succeeded", "failed", "unknown"]
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class FailureRecoveryEpisode(StrictTrajectoryModel):
+    """A local P0 failure window without an inferred causal conclusion."""
+
+    kind: Literal["failure_recovery_episode"] = "failure_recovery_episode"
+    priority: Literal["P0"] = "P0"
+    pre_failure_public_context: str | None = None
+    failed_action: EpisodeAction
+    post_failure_public_context: str | None = None
+    post_failure_actions: tuple[EpisodeAction, ...] = ()
+    recovery_observation: Literal[
+        "first_subsequent_success_observed",
+        "no_success_observed",
+        "truncated_before_success",
+    ]
+    skill_access: SkillAccessObservation
+
+
+class EvolutionProjectionCaseV3(StrictTrajectoryModel):
+    """One failed Evolution case in the v3 optimizer-facing projection."""
+
+    case_id: str
+    prompt: str
+    task_contract: str
+    difficulty_tier: str
+    context: tuple[ProjectionContext, ...]
+    evidence: tuple[ProjectionEvidence | FailureRecoveryEpisode, ...]
+    candidate_output: ProjectionCandidateOutput
+    final_submission_attempt: FinalSubmissionAttempt | None = None
+    evaluation: ProjectionEvaluation
+
+
+class EvolutionAgentInputV3(StrictTrajectoryModel):
+    """Agent-only v3 view with bounded failure-recovery and Skill access evidence."""
+
+    schema_version: Literal["evolution-coding-agent-input-v3"] = "evolution-coding-agent-input-v3"
+    exposed_for_optimization: Literal[True] = True
+    session_derived_evidence_untrusted: Literal[True] = True
+    projection_rule_version: str
+    environment_fingerprint: str
+    evaluated_skill: EvaluatedSkill
+    skill: str
+    trajectories: tuple[EvolutionProjectionCaseV3, ...]

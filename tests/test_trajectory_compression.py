@@ -283,7 +283,8 @@ def test_evolution_input_bounds_prompt_and_context_source(tmp_path: Path) -> Non
     assert prompt.endswith("…<truncated>")
     assert len(prompt.encode("utf-8")) <= policy.max_prompt_bytes
     payload = canonical_json_bytes(agent_input.model_dump(mode="json")).decode("utf-8")
-    assert "sha256" not in payload
+    assert "redacted_session_sha256" not in payload
+    assert agent_input.evaluated_skill.content_sha256 in payload
 
     with pytest.raises(
         TrajectoryCompressionError, match="Evolution agent input exceeds size limit"

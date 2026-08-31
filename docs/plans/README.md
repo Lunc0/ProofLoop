@@ -16,3 +16,4 @@
 | 07 | v0.7 | 已完成 | [分层滚动评测器](07-v0.7-tiered-rolling-evaluator.md) | [规格](../specs/07-v0.7-tiered-rolling-evaluator.md) | [实现记录](../design/07-v0.7-tiered-rolling-evaluator.md) |
 | 08 | v0.8 | 已完成 | [DSH 轨迹压缩与 Evolution Coding Agent 输入](08-v0.8-dsh-trajectory-compression.md) | [规格](../specs/08-v0.8-dsh-trajectory-compression.md) | [实现记录](../design/08-v0.8-dsh-trajectory-compression.md) |
 | 09 | v0.8.1 | 已完成 | [失败轨迹的 Agent 投影压缩](09-v0.8.1-agent-projection-evidence-compression.md) | [规格](../specs/09-v0.8.1-agent-projection-evidence-compression.md) | [实现记录](../design/09-v0.8.1-agent-projection-evidence-compression.md) |
+| 10 | v0.8.2 | 已完成 | [失败恢复窗口与 Skill 接触证据](10-v0.8.2-failure-recovery-skill-access-evidence.md) | [规格](../specs/10-v0.8.2-failure-recovery-skill-access-evidence.md) | [实现记录](../design/10-v0.8.2-failure-recovery-skill-access-evidence.md) |
