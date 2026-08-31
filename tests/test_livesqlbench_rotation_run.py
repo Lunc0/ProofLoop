@@ -181,9 +181,9 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     agent_input = evolution.run.path / "agent-input" / "trajectory.json"
     assert agent_input.is_file()
     assert not (smoke.run.path / "agent-input").exists()
-    agent_input_text = agent_input.read_text(encoding="utf-8")
-    assert "expected_query" not in agent_input_text
-    assert "Markdown fenced code block" in agent_input_text
+    passing_input = json.loads(agent_input.read_text(encoding="utf-8"))
+    assert passing_input["trajectories"] == []
+    assert passing_input["omitted_cases"] == []
 
     monkeypatch.setattr(
         "skill_evolve.benchmark.livesqlbench_run.DshRunner", TaskFailureStubDshRunner
@@ -191,11 +191,15 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     task_failure = run_rotation_dsh_suite(
         evolution_suite, dsh_config, None, model, tmp_path / "runs", subject
     )
-    task_failure_input = (task_failure.run.path / "agent-input" / "trajectory.json").read_text(
-        encoding="utf-8"
+    task_failure_input = json.loads(
+        (task_failure.run.path / "agent-input" / "trajectory.json").read_text(encoding="utf-8")
     )
     assert task_failure.status == "task_failure"
-    assert '"verdict":"no_sql_generated"' in task_failure_input
+    assert len(task_failure_input["trajectories"]) == len(evolution_suite.cases)
+    assert all(
+        case["trajectory"]["evaluation"]["verdict"] == "no_sql_generated"
+        for case in task_failure_input["trajectories"]
+    )
 
     monkeypatch.setattr(
         "skill_evolve.benchmark.livesqlbench_run.DshRunner", TimeoutStubDshRunner

@@ -133,7 +133,7 @@ def run_rotation_dsh_suite(
         runner_cases.append(runner_case)
         trajectories.append(_public_trajectory(runner_case))
         _write_runner_artifacts(run, case, execution)
-        if suite.kind == "evolution":
+        if suite.kind == "evolution" and not evaluation.passed:
             compressed, omission = _compress_evolution_case(
                 runner_case, execution, evaluation, dsh_config.timeout_ms
             )
