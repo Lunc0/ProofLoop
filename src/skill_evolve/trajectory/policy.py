@@ -12,6 +12,7 @@ class CompressorPolicy:
     """All behaviour that can affect a compressed trajectory's bytes."""
 
     rule_version: str = "dsh-trajectory-compressor-v1"
+    projection_rule_version: str = "evolution-projection-v2"
     max_events: int = 10_000
     max_assistant_text_bytes: int = 4_096
     max_tool_arguments_bytes: int = 4_096
@@ -23,15 +24,32 @@ class CompressorPolicy:
     max_skill_bytes: int = 24_576
     max_trajectory_bytes: int = 524_288
     max_agent_input_bytes: int = 2_097_152
+    max_projection_text_bytes: int = 2_048
+    max_projection_evidence: int = 80
+    max_selected_context_records: int = 12
     max_list_items: int = 20
     high_tool_call_count: int = 12
     high_total_tokens: int = 20_000
 
     def canonical_bytes(self) -> bytes:
-        """Return the stable representation used in source evidence."""
+        """Return the v1 compressor settings used in custody source evidence.
+
+        Projection-only limits deliberately stay out of this representation so
+        adding a v2 view does not change an otherwise identical v1 audit
+        trajectory's policy fingerprint.
+        """
+
+        values = asdict(self)
+        for key in (
+            "projection_rule_version",
+            "max_projection_text_bytes",
+            "max_projection_evidence",
+            "max_selected_context_records",
+        ):
+            values.pop(key)
 
         return json.dumps(
-            asdict(self), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            values, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
 
     @property

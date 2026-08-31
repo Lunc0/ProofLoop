@@ -1,0 +1,577 @@
+"""Build the compact, optimizer-facing view from v1 custody evidence."""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from skill_evolve.trajectory.compressor import _safe_text
+from skill_evolve.trajectory.contracts import (
+    CompressedToolCall,
+    CompressedTrajectory,
+    EvidenceText,
+    FinalSubmissionAttempt,
+    ProjectionCandidateOutput,
+    ProjectionContext,
+    ProjectionEvaluation,
+    ProjectionEvidence,
+)
+from skill_evolve.trajectory.dependency import (
+    SqlReferences,
+    extract_sql_references,
+    sample_coverage,
+)
+from skill_evolve.trajectory.policy import CompressorPolicy
+
+_SQL_FENCE = re.compile(r"```(?:sql|postgresql)\s*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
+_SQL_READONLY_SINGLE_QUOTE = re.compile(
+    r"sql-readonly\.ps1\s+-Query\s+'((?:''|[^'])*)'", re.IGNORECASE | re.DOTALL
+)
+_SQL_READONLY_DOUBLE_QUOTE = re.compile(
+    r'sql-readonly\.ps1\s+-Query\s+"((?:`.|[^\"])*)"', re.IGNORECASE | re.DOTALL
+)
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+_DDL_TABLE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w.\"]+)\s*\((.*?)\)\s*;",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class ProjectionContextSource:
+    """One bounded public context source; its path never enters the projection."""
+
+    role: Literal["schema", "knowledge", "column_meaning"]
+    text: str
+
+
+@dataclass(frozen=True)
+class _SqlAction:
+    evidence_index: int
+    references: SqlReferences
+    status: str
+
+
+def project_context(
+    sources: tuple[ProjectionContextSource, ...],
+    trajectory: CompressedTrajectory,
+    policy: CompressorPolicy,
+) -> tuple[ProjectionContext, ...]:
+    """Select direct public-context evidence, with a bounded conservative fallback."""
+
+    references = _reference_corpus(trajectory)
+    sql_tables = _sql_tables(trajectory)
+    return tuple(
+        _project_context_source(source, references, sql_tables, policy) for source in sources
+    )
+
+
+def project_evidence(
+    trajectory: CompressedTrajectory, policy: CompressorPolicy
+) -> tuple[ProjectionEvidence, ...]:
+    """Project paired v1 steps into priority-ordered, metadata-free evidence."""
+
+    drafts: list[dict[str, Any]] = []
+    sql_actions: list[_SqlAction] = []
+    calls = tuple(call for step in trajectory.trajectory for call in step.tool_calls)
+
+    if trajectory.trace.trace_completeness != "complete":
+        drafts.append(
+            {
+                "kind": "trace_state",
+                "priority": "P0",
+                "outcome": "unknown",
+                "detail": {
+                    "trace_completeness": trajectory.trace.trace_completeness,
+                    "runner_outcome": trajectory.trace.runner_outcome,
+                    "missing_terminal_events": list(trajectory.trace.missing_terminal_events),
+                },
+            }
+        )
+
+    call_position = 0
+    for step in trajectory.trajectory:
+        for message in step.public_assistant_text:
+            drafts.append(
+                {
+                    "kind": "public_assistant_statement",
+                    "priority": "P3",
+                    "outcome": "unknown",
+                    "detail": {"text": _limit(message.text, policy.max_projection_text_bytes)},
+                }
+            )
+        for call in step.tool_calls:
+            action = _project_call(
+                call,
+                _has_later_successful_read(calls[call_position + 1 :]),
+                any(
+                    later.adapter == call.adapter and later.status == "succeeded"
+                    for later in calls[call_position + 1 :]
+                ),
+                policy,
+            )
+            drafts.append(action)
+            if call.adapter == "sql-readonly":
+                query = _sql_query(call)
+                if query is not None:
+                    sql_actions.append(
+                        _SqlAction(
+                            evidence_index=len(drafts) - 1,
+                            references=extract_sql_references(query),
+                            status=call.status,
+                        )
+                    )
+            call_position += 1
+
+    _apply_sample_coverage(drafts, sql_actions)
+    selected = _select_evidence(drafts, policy)
+    return tuple(
+        ProjectionEvidence(
+            kind=draft["kind"],
+            priority=draft["priority"],
+            outcome=draft["outcome"],
+            detail=draft["detail"],
+        )
+        for draft in selected
+    )
+
+
+def project_candidate_output(trajectory: CompressedTrajectory) -> ProjectionCandidateOutput:
+    """Expose only the candidate SQL accepted by the runner contract."""
+
+    sql = trajectory.candidate_output.sql
+    return ProjectionCandidateOutput(sql=sql.text if sql is not None else None)
+
+
+def project_final_submission_attempt(
+    trajectory: CompressedTrajectory, policy: CompressorPolicy
+) -> FinalSubmissionAttempt | None:
+    """Keep a final public attempt separate when no candidate was submitted."""
+
+    if trajectory.candidate_output.sql is not None:
+        return None
+    final_message = trajectory.candidate_output.final_message
+    if final_message is None:
+        return None
+    matches = _SQL_FENCE.findall(final_message.text)
+    status: Literal[
+        "no_sql_fence", "multiple_sql_fences", "empty_sql_fence", "runner_rejected"
+    ]
+    if not matches:
+        status = "no_sql_fence"
+    elif len(matches) > 1:
+        status = "multiple_sql_fences"
+    elif not matches[0].strip():
+        status = "empty_sql_fence"
+    else:
+        status = "runner_rejected"
+    return FinalSubmissionAttempt(
+        text=_limit(final_message.text, policy.max_projection_text_bytes),
+        extraction_status=status,
+        not_submitted_reason="runner did not provide candidate SQL",
+    )
+
+
+def project_evaluation(
+    trajectory: CompressedTrajectory, policy: CompressorPolicy
+) -> ProjectionEvaluation:
+    """Remove custody hashes while retaining agent-safe evaluator feedback."""
+
+    evaluation = trajectory.evaluation
+    return ProjectionEvaluation(
+        slice=evaluation.slice,
+        verdict=evaluation.verdict,
+        candidate_sql=(
+            _limit(evaluation.candidate_sql.text, policy.max_projection_text_bytes)
+            if evaluation.candidate_sql is not None
+            else None
+        ),
+        detail=(
+            _limit(evaluation.detail.text, policy.max_projection_text_bytes)
+            if evaluation.detail is not None
+            else None
+        ),
+        usage=evaluation.usage,
+    )
+
+
+def _project_call(
+    call: CompressedToolCall,
+    later_read: bool,
+    later_same_adapter_success: bool,
+    policy: CompressorPolicy,
+) -> dict[str, Any]:
+    if call.status == "failed" or call.direct_failure is not None:
+        detail = {
+            "tool": call.adapter,
+            "action": _action_parameters(call, policy),
+            "error": _limit(_evidence_value(call.output), policy.max_projection_text_bytes),
+            "direct_failure": (
+                {
+                    "category": call.direct_failure.category,
+                    "cause": call.direct_failure.direct_cause,
+                }
+                if call.direct_failure is not None
+                else None
+            ),
+            "later_same_tool_success": later_same_adapter_success,
+        }
+        return {"kind": "tool_failure", "priority": "P0", "outcome": "failed", "detail": detail}
+
+    if call.adapter == "sql-readonly":
+        return _project_sql_call(call, policy)
+    if call.adapter == "glob" and later_read:
+        return {
+            "kind": "workspace_discovery",
+            "priority": "P3",
+            "outcome": _outcome(call.status),
+            "detail": {
+                "action": "directory discovery",
+                "match_count": _nonnegative_summary_value(call.summary.get("match_count")),
+                "folded": True,
+            },
+        }
+    if call.adapter == "read":
+        return {
+            "kind": "file_read",
+            "priority": "P1",
+            "outcome": _outcome(call.status),
+            "detail": {
+                "target": _summary_text(call.summary.get("target")),
+                "result": "reflected in selected context or retained as bounded evidence",
+            },
+        }
+    return {
+        "kind": f"tool_{call.adapter}",
+        "priority": "P2",
+        "outcome": _outcome(call.status),
+        "detail": {
+            "tool": call.name,
+            "action": _action_parameters(call, policy),
+            "result": _limit(_evidence_value(call.output), policy.max_projection_text_bytes),
+        },
+    }
+
+
+def _project_sql_call(call: CompressedToolCall, policy: CompressorPolicy) -> dict[str, Any]:
+    query = _sql_query(call)
+    if query is None:
+        return {
+            "kind": "sql_unparsed",
+            "priority": "P2",
+            "outcome": _outcome(call.status),
+            "detail": {
+                "query": _limit(call.arguments.text, policy.max_projection_text_bytes),
+                "result": _sql_result(call.output, policy),
+            },
+        }
+    references = extract_sql_references(query)
+    detail: dict[str, Any] = {
+        "query": _limit(query, policy.max_projection_text_bytes),
+        "parse_status": references.parse_status,
+        "tables": list(references.tables),
+        "qualified_columns": list(references.qualified_columns),
+        "clauses": list(references.clauses),
+        "result": _sql_result(call.output, policy),
+    }
+    if references.parse_status != "parsed":
+        return {
+            "kind": "sql_unparsed",
+            "priority": "P2",
+            "outcome": _outcome(call.status),
+            "detail": detail,
+        }
+    return {
+        "kind": "sql_query",
+        "priority": "P2",
+        "outcome": _outcome(call.status),
+        "detail": detail,
+    }
+
+
+def _apply_sample_coverage(drafts: list[dict[str, Any]], sql_actions: list[_SqlAction]) -> None:
+    for sample_index, sample in enumerate(sql_actions):
+        if sample.status != "succeeded" or not sample.references.is_limited_sample:
+            continue
+        covered: set[str] = set()
+        for aggregate in sql_actions[sample_index + 1 :]:
+            if aggregate.status == "succeeded":
+                covered.update(sample_coverage(sample.references, aggregate.references))
+        if not covered:
+            continue
+        detail = drafts[sample.evidence_index]["detail"]
+        detail["coverage"] = (
+            "covered" if covered == set(sample.references.sample_fields) else "partial"
+        )
+        detail["covered_fields"] = sorted(covered)
+        result = detail.get("result")
+        if isinstance(result, dict):
+            result.pop("sample", None)
+            result["sample_rows"] = "omitted: later aggregate covers the listed fields"
+
+
+def _select_evidence(
+    drafts: list[dict[str, Any]], policy: CompressorPolicy
+) -> list[dict[str, Any]]:
+    order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    indexed = sorted(enumerate(drafts), key=lambda item: (order[item[1]["priority"]], item[0]))
+    required = [draft for _, draft in indexed if draft["priority"] == "P0"]
+    optional = [draft for _, draft in indexed if draft["priority"] != "P0"]
+    remaining = max(0, policy.max_projection_evidence - len(required))
+    return required + optional[:remaining]
+
+
+def _has_later_successful_read(calls: tuple[CompressedToolCall, ...]) -> bool:
+    return any(call.adapter == "read" and call.status == "succeeded" for call in calls)
+
+
+def _action_parameters(call: CompressedToolCall, policy: CompressorPolicy) -> dict[str, Any]:
+    try:
+        parsed = json.loads(call.arguments.text)
+    except json.JSONDecodeError:
+        return {"argument_excerpt": _limit(call.arguments.text, policy.max_projection_text_bytes)}
+    if not isinstance(parsed, dict):
+        return {"argument_excerpt": _limit(call.arguments.text, policy.max_projection_text_bytes)}
+    permitted = ("command", "description", "limit", "offset", "pattern", "query", "queries")
+    result: dict[str, Any] = {}
+    for key in permitted:
+        value = parsed.get(key)
+        if isinstance(value, str):
+            result[key] = _limit(_safe_text(value), policy.max_projection_text_bytes)
+        elif isinstance(value, int) and value >= 0:
+            result[key] = value
+        elif (
+            key == "queries"
+            and isinstance(value, list)
+            and all(isinstance(item, str) for item in value)
+        ):
+            result[key] = [
+                _limit(_safe_text(item), policy.max_projection_text_bytes) for item in value
+            ]
+    return result or {"argument_shape": "structured"}
+
+
+def _sql_query(call: CompressedToolCall) -> str | None:
+    try:
+        parsed = json.loads(call.arguments.text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    for key in ("query", "sql"):
+        value = parsed.get(key)
+        if isinstance(value, str):
+            return _safe_text(value)
+    command = parsed.get("command")
+    if not isinstance(command, str):
+        return None
+    single_quote = _SQL_READONLY_SINGLE_QUOTE.search(command)
+    if single_quote is not None:
+        return _safe_text(single_quote.group(1).replace("''", "'"))
+    double_quote = _SQL_READONLY_DOUBLE_QUOTE.search(command)
+    if double_quote is not None:
+        return _safe_text(re.sub(r"`(.)", r"\1", double_quote.group(1)))
+    return None
+
+
+def _sql_result(output: EvidenceText | None, policy: CompressorPolicy) -> dict[str, Any]:
+    text = _evidence_value(output)
+    if not text:
+        return {"availability": "unavailable"}
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return {"result_excerpt": _limit(text, policy.max_projection_text_bytes)}
+    if not isinstance(value, dict):
+        return {"result_excerpt": _limit(text, policy.max_projection_text_bytes)}
+    columns = value.get("columns")
+    rows = value.get("rows")
+    result: dict[str, Any] = {}
+    if isinstance(columns, list) and all(isinstance(column, str) for column in columns):
+        result["columns"] = [_limit(column, 128) for column in columns]
+    if isinstance(rows, list):
+        result["row_count"] = len(rows)
+        result["sample"] = rows[:3]
+    return result or {"result_excerpt": _limit(text, policy.max_projection_text_bytes)}
+
+
+def _project_context_source(
+    source: ProjectionContextSource,
+    reference_corpus: str,
+    sql_tables: set[str],
+    policy: CompressorPolicy,
+) -> ProjectionContext:
+    if source.role == "schema":
+        selected, total = _select_schema(source.text, sql_tables, policy)
+    else:
+        selected, total = _select_records(source.text, reference_corpus, policy)
+    if selected:
+        return ProjectionContext(
+            role=source.role,
+            selection="direct_reference",
+            text="\n".join(selected),
+            selected_count=len(selected),
+            omitted_count=max(0, total - len(selected)),
+        )
+    return ProjectionContext(
+        role=source.role,
+        selection="fallback",
+        text=_limit(source.text, policy.max_context_bytes),
+        selected_count=0,
+        omitted_count=max(0, total),
+    )
+
+
+def _select_schema(
+    text: str, sql_tables: set[str], policy: CompressorPolicy
+) -> tuple[list[str], int]:
+    blocks = list(_DDL_TABLE.finditer(text))
+    if not blocks:
+        return [], 0
+    selected: list[str] = []
+    selected_names: set[str] = set()
+    for block in blocks:
+        name = _normalise_relation(block.group(1))
+        if name in sql_tables:
+            selected.append(_limit(block.group(0), policy.max_context_bytes))
+            selected_names.add(name)
+    if selected_names:
+        referenced_by_selected = {
+            _normalise_relation(value)
+            for block in blocks
+            if _normalise_relation(block.group(1)) in selected_names
+            for value in re.findall(r"REFERENCES\s+([\w.\"]+)", block.group(2), re.IGNORECASE)
+        }
+        for block in blocks:
+            name = _normalise_relation(block.group(1))
+            if name in selected_names:
+                continue
+            references = {
+                _normalise_relation(value)
+                for value in re.findall(r"REFERENCES\s+([\w.\"]+)", block.group(2), re.IGNORECASE)
+            }
+            if name in referenced_by_selected or references & selected_names:
+                selected.append(_limit(block.group(0), policy.max_context_bytes))
+    return selected[: policy.max_selected_context_records], len(blocks)
+
+
+def _select_records(
+    text: str, reference_corpus: str, policy: CompressorPolicy
+) -> tuple[list[str], int]:
+    records = _records_from_text(text)
+    selected: list[str] = []
+    lowered_corpus = reference_corpus.casefold()
+    for record in records:
+        labels = _record_labels(record)
+        if labels and any(_contains_reference(lowered_corpus, label) for label in labels):
+            selected.append(_limit(record, policy.max_context_bytes))
+    return selected[: policy.max_selected_context_records], len(records)
+
+
+def _records_from_text(text: str) -> list[str]:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return [line for line in text.splitlines() if line.strip()]
+    if isinstance(parsed, list):
+        return [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in parsed]
+    if isinstance(parsed, dict):
+        return [json.dumps(parsed, ensure_ascii=False, sort_keys=True)]
+    return [text]
+
+
+def _record_labels(record: str) -> tuple[str, ...]:
+    try:
+        parsed = json.loads(record)
+    except json.JSONDecodeError:
+        return tuple(
+            match.group(0) for match in _IDENTIFIER.finditer(record) if len(match.group(0)) >= 3
+        )
+    if not isinstance(parsed, dict):
+        return ()
+    labels: list[str] = []
+    for key in ("id", "key", "name", "title", "code"):
+        value = parsed.get(key)
+        if isinstance(value, str) and len(value) >= 2:
+            labels.append(value)
+    return tuple(labels)
+
+
+def _contains_reference(corpus: str, label: str) -> bool:
+    pattern = rf"(?<![A-Za-z0-9_$]){re.escape(label.casefold())}(?![A-Za-z0-9_$])"
+    return bool(re.search(pattern, corpus))
+
+
+def _reference_corpus(trajectory: CompressedTrajectory) -> str:
+    values: list[str] = []
+    for step in trajectory.trajectory:
+        values.extend(message.text for message in step.public_assistant_text)
+        values.extend(call.arguments.text for call in step.tool_calls)
+    if trajectory.candidate_output.sql is not None:
+        values.append(trajectory.candidate_output.sql.text)
+    if trajectory.candidate_output.final_message is not None:
+        values.append(trajectory.candidate_output.final_message.text)
+    if trajectory.evaluation.detail is not None:
+        values.append(trajectory.evaluation.detail.text)
+    return "\n".join(values)
+
+
+def _sql_tables(trajectory: CompressedTrajectory) -> set[str]:
+    tables: set[str] = set()
+    for step in trajectory.trajectory:
+        for call in step.tool_calls:
+            if call.adapter != "sql-readonly":
+                continue
+            query = _sql_query(call)
+            if query is not None:
+                tables.update(
+                    _normalise_relation(table) for table in extract_sql_references(query).tables
+                )
+    if trajectory.candidate_output.sql is not None:
+        tables.update(
+            _normalise_relation(table)
+            for table in extract_sql_references(trajectory.candidate_output.sql.text).tables
+        )
+    return tables
+
+
+def _normalise_relation(value: str) -> str:
+    return value.replace('"', "").casefold()
+
+
+def _summary_text(value: object) -> str | None:
+    return value.text if isinstance(value, EvidenceText) else None
+
+
+def _nonnegative_summary_value(value: object) -> int | None:
+    return value if isinstance(value, int) and value >= 0 else None
+
+
+def _evidence_value(value: EvidenceText | None) -> str:
+    return value.text if value is not None else ""
+
+
+def _outcome(status: str) -> Literal["succeeded", "failed", "unknown"]:
+    if status == "succeeded":
+        return "succeeded"
+    if status == "failed":
+        return "failed"
+    return "unknown"
+
+
+def _limit(value: str, limit: int) -> str:
+    encoded = _safe_text(value).encode("utf-8")
+    if len(encoded) <= limit:
+        return encoded.decode("utf-8")
+    marker = "\n…<truncated>"
+    prefix = encoded[: max(0, limit - len(marker.encode("utf-8")))].decode("utf-8", errors="ignore")
+    return prefix + marker
+
+
+def iter_identifiers(value: str) -> Iterable[str]:
+    """Expose direct identifier tokens for focused unit tests and future selectors."""
+
+    return (match.group(0) for match in _IDENTIFIER.finditer(value))

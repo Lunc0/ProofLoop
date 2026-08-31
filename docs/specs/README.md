@@ -15,3 +15,4 @@
 | 06 | v0.6 | 已完成；baseline 待授权 | [Base-Lite 三十题最终 Held-out 评测集](06-v0.6-livesqlbench-final-thirty-query-suite.md) | [实施计划](../plans/06-v0.6-livesqlbench-final-thirty-query-suite.md) | [实现记录](../design/06-v0.6-livesqlbench-final-thirty-query-suite.md) |
 | 07 | v0.7 | 已完成 | [分层滚动评测器](07-v0.7-tiered-rolling-evaluator.md) | [实施计划](../plans/07-v0.7-tiered-rolling-evaluator.md) | [实现记录](../design/07-v0.7-tiered-rolling-evaluator.md) |
 | 08 | v0.8 | 已完成 | [DSH 轨迹压缩与 Evolution Coding Agent 输入](08-v0.8-dsh-trajectory-compression.md) | [实施计划](../plans/08-v0.8-dsh-trajectory-compression.md) | [实现记录](../design/08-v0.8-dsh-trajectory-compression.md) |
+| 09 | v0.8.1 | 已完成 | [Evolution 失败轨迹的依赖感知 Agent 投影压缩](09-v0.8.1-agent-projection-evidence-compression.md) | [实施计划](../plans/09-v0.8.1-agent-projection-evidence-compression.md) | [实现记录](../design/09-v0.8.1-agent-projection-evidence-compression.md) |

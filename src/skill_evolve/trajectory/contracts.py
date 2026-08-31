@@ -160,3 +160,75 @@ class EvolutionAgentInput(StrictTrajectoryModel):
     trajectories: tuple[EvolutionCaseInput, ...]
     omitted_cases: tuple[dict[str, str], ...] = ()
     policy_sha256: str
+
+
+class ProjectionContext(StrictTrajectoryModel):
+    """Trusted public context selected for an optimizer-facing projection."""
+
+    role: Literal["schema", "knowledge", "column_meaning"]
+    selection: Literal["direct_reference", "fallback"]
+    text: str
+    selected_count: int = Field(ge=0)
+    omitted_count: int = Field(ge=0)
+
+
+class ProjectionEvidence(StrictTrajectoryModel):
+    """One bounded fact from untrusted session-derived evidence."""
+
+    kind: str
+    priority: Literal["P0", "P1", "P2", "P3"]
+    outcome: Literal["succeeded", "failed", "unknown"]
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectionCandidateOutput(StrictTrajectoryModel):
+    """Only SQL that the runner/evaluator actually accepted as a candidate."""
+
+    sql: str | None = None
+
+
+class FinalSubmissionAttempt(StrictTrajectoryModel):
+    """Public final text that was not accepted as runner candidate SQL."""
+
+    text: str
+    extraction_status: Literal[
+        "no_sql_fence", "multiple_sql_fences", "empty_sql_fence", "runner_rejected"
+    ]
+    not_submitted_reason: str
+
+
+class ProjectionEvaluation(StrictTrajectoryModel):
+    """Public evaluator evidence safe for the optimizer view."""
+
+    slice: str
+    verdict: str
+    candidate_sql: str | None = None
+    detail: str | None = None
+    usage: dict[str, int | float | None]
+
+
+class EvolutionProjectionCase(StrictTrajectoryModel):
+    """One failed Evolution case in the v2 optimizer-facing projection."""
+
+    case_id: str
+    prompt: str
+    task_contract: str
+    difficulty_tier: str
+    context: tuple[ProjectionContext, ...]
+    evidence: tuple[ProjectionEvidence, ...]
+    candidate_output: ProjectionCandidateOutput
+    final_submission_attempt: FinalSubmissionAttempt | None = None
+    evaluation: ProjectionEvaluation
+
+
+class EvolutionAgentInputV2(StrictTrajectoryModel):
+    """Agent-only v2 view; custody metadata deliberately remains in v1 artifacts."""
+
+    schema_version: Literal["evolution-coding-agent-input-v2"] = "evolution-coding-agent-input-v2"
+    exposed_for_optimization: Literal[True] = True
+    session_derived_evidence_untrusted: Literal[True] = True
+    projection_rule_version: str
+    environment_fingerprint: str
+    subject_id: str
+    skill: str
+    trajectories: tuple[EvolutionProjectionCase, ...]

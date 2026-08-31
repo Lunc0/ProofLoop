@@ -182,8 +182,9 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     assert agent_input.is_file()
     assert not (smoke.run.path / "agent-input").exists()
     passing_input = json.loads(agent_input.read_text(encoding="utf-8"))
+    assert passing_input["schema_version"] == "evolution-coding-agent-input-v2"
     assert passing_input["trajectories"] == []
-    assert passing_input["omitted_cases"] == []
+    assert "omitted_cases" not in passing_input
 
     monkeypatch.setattr(
         "skill_evolve.benchmark.livesqlbench_run.DshRunner", TaskFailureStubDshRunner
@@ -197,7 +198,7 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     assert task_failure.status == "task_failure"
     assert len(task_failure_input["trajectories"]) == len(evolution_suite.cases)
     assert all(
-        case["trajectory"]["evaluation"]["verdict"] == "no_sql_generated"
+        case["evaluation"]["verdict"] == "no_sql_generated"
         for case in task_failure_input["trajectories"]
     )
 

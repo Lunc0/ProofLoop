@@ -269,7 +269,7 @@ def test_evolution_input_bounds_prompt_and_context_source(tmp_path: Path) -> Non
             _turn_end(2, 1),
         ),
         RunnerCaseOutput(case_id=case.instance_id, status="completed", trajectory=()),
-        _evaluation(case_id=case.instance_id),
+        _evaluation(Verdict.NO_SQL_GENERATED, case_id=case.instance_id),
         runner_outcome="completed",
     )
     subject = _subject("skill")
@@ -280,8 +280,10 @@ def test_evolution_input_bounds_prompt_and_context_source(tmp_path: Path) -> Non
     )
 
     prompt = agent_input.trajectories[0].prompt
-    assert prompt.truncated is True
-    assert len(prompt.text.encode("utf-8")) <= policy.max_prompt_bytes
+    assert prompt.endswith("…<truncated>")
+    assert len(prompt.encode("utf-8")) <= policy.max_prompt_bytes
+    payload = canonical_json_bytes(agent_input.model_dump(mode="json")).decode("utf-8")
+    assert "sha256" not in payload
 
     with pytest.raises(
         TrajectoryCompressionError, match="Evolution agent input exceeds size limit"
@@ -301,6 +303,28 @@ def test_evolution_input_bounds_prompt_and_context_source(tmp_path: Path) -> Non
         build_evolution_agent_input(
             "manifest", "environment", subject, ((case, trajectory),), policy=policy
         )
+
+
+def test_projection_only_limits_do_not_change_v1_custody_artifact() -> None:
+    session = _jsonl(
+        _header(),
+        _assistant(1, 1, 1, [{"type": "text", "text": "done"}]),
+        _turn_end(2, 1),
+    )
+    first_policy = CompressorPolicy(max_projection_text_bytes=32)
+    second_policy = CompressorPolicy(max_projection_text_bytes=512)
+
+    first = compress_session_jsonl(
+        session, _runner_case(), _evaluation(), runner_outcome="completed", policy=first_policy
+    )
+    second = compress_session_jsonl(
+        session, _runner_case(), _evaluation(), runner_outcome="completed", policy=second_policy
+    )
+
+    assert first_policy.sha256 == second_policy.sha256
+    assert canonical_json_bytes(first.model_dump(mode="json")) == canonical_json_bytes(
+        second.model_dump(mode="json")
+    )
 
 
 def _runner_case() -> RunnerCaseOutput:
