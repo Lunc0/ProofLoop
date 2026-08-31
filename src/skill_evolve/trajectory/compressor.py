@@ -248,7 +248,7 @@ def compress_session_jsonl(
             missing_result_count=missing_results,
         ),
     )
-    return _with_artifact_digest(draft)
+    return _with_artifact_digest(draft, policy)
 
 
 def _validate_header(event: Mapping[str, Any]) -> dict[str, int]:
@@ -496,7 +496,7 @@ def _compressed_call(
         output=output,
         status=status,
         direct_failure=direct_failure,
-        summary=_tool_summary(adapter, call.arguments, result, policy),
+        summary=_tool_summary(adapter, call.name, call.arguments, result, policy, truncated_fields),
     )
 
 
@@ -511,28 +511,42 @@ def _adapter_name(name: str, arguments: str) -> str:
 
 
 def _tool_summary(
-    adapter: str, arguments: str, result: _ToolResult | None, policy: CompressorPolicy
+    adapter: str,
+    name: str,
+    arguments: str,
+    result: _ToolResult | None,
+    policy: CompressorPolicy,
+    truncated_fields: list[str],
 ) -> dict[str, Any]:
     parsed = _json_object(arguments)
     summary: dict[str, Any] = {
+        "untrusted_evidence": True,
         "arguments_sha256": hashlib.sha256(_safe_text(arguments).encode("utf-8")).hexdigest(),
+        "deduplication_sha256": _deduplication_sha256(adapter, name, arguments),
     }
     if result is not None:
         summary["result_sha256"] = hashlib.sha256(
             _safe_text(result.text).encode("utf-8")
         ).hexdigest()
     if adapter == "read" and parsed is not None:
-        _copy_string(parsed, summary, "path")
+        target = _read_target(parsed)
+        if target is not None:
+            summary["target"] = _summary_evidence(
+                target, "read_target", policy, truncated_fields
+            )
         _copy_nonnegative(parsed, summary, "offset")
         _copy_nonnegative(parsed, summary, "limit")
     elif adapter == "glob" and parsed is not None:
-        _copy_string(parsed, summary, "pattern")
+        _copy_summary_text(parsed, summary, "pattern", policy, truncated_fields)
         if result is not None:
             paths = result.meta.get("paths")
             if isinstance(paths, list) and all(isinstance(path, str) for path in paths):
                 ordered = sorted(_safe_text(path) for path in paths)
                 summary["match_count"] = len(ordered)
-                summary["sample_paths"] = ordered[: policy.max_list_items]
+                summary["sample_paths"] = [
+                    _summary_evidence(path, "glob_path", policy, truncated_fields)
+                    for path in ordered[: policy.max_list_items]
+                ]
                 summary["omitted_count"] = max(0, len(ordered) - policy.max_list_items)
     elif adapter == "sql-readonly" and parsed is not None:
         command = parsed.get("command")
@@ -543,20 +557,23 @@ def _tool_summary(
     elif adapter == "web_search" and parsed is not None:
         queries = parsed.get("queries")
         if isinstance(queries, list) and all(isinstance(query, str) for query in queries):
-            summary["queries"] = [_safe_text(query) for query in queries[: policy.max_list_items]]
+            summary["queries"] = [
+                _summary_evidence(query, "web_query", policy, truncated_fields)
+                for query in queries[: policy.max_list_items]
+            ]
             summary["omitted_query_count"] = max(0, len(queries) - policy.max_list_items)
         if result is not None:
             summary["retrieved_at_ms"] = result.location.observed_time_ms
             sources = result.meta.get("sources")
             if isinstance(sources, list):
-                public_sources = _web_sources(sources)
+                public_sources = _web_sources(sources, policy, truncated_fields)
                 summary["source_count"] = len(public_sources)
                 summary["sources"] = public_sources[: policy.max_list_items]
                 summary["omitted_source_count"] = max(
                     0, len(public_sources) - policy.max_list_items
                 )
     elif adapter == "pwsh" and parsed is not None:
-        _copy_string(parsed, summary, "description")
+        _copy_summary_text(parsed, summary, "description", policy, truncated_fields)
         command = parsed.get("command")
         if isinstance(command, str):
             summary["command_sha256"] = hashlib.sha256(
@@ -565,14 +582,30 @@ def _tool_summary(
     return summary
 
 
-def _copy_string(source: Mapping[str, object], destination: dict[str, Any], key: str) -> None:
+def _read_target(source: Mapping[str, object]) -> str | None:
+    for key in ("path", "file_path"):
+        value = source.get(key)
+        if isinstance(value, str):
+            return _safe_path_reference(value)
+    return None
+
+
+def _copy_summary_text(
+    source: Mapping[str, object],
+    destination: dict[str, Any],
+    key: str,
+    policy: CompressorPolicy,
+    truncated_fields: list[str],
+) -> None:
     value = source.get(key)
     if isinstance(value, str):
-        destination[key] = _safe_text(value)
+        destination[key] = _summary_evidence(value, f"summary_{key}", policy, truncated_fields)
 
 
-def _web_sources(values: list[object]) -> list[dict[str, str]]:
-    sources: list[dict[str, str]] = []
+def _web_sources(
+    values: list[object], policy: CompressorPolicy, truncated_fields: list[str]
+) -> list[dict[str, EvidenceText]]:
+    public_sources: list[tuple[str, str, str | None]] = []
     for value in values:
         if not isinstance(value, Mapping):
             continue
@@ -581,11 +614,69 @@ def _web_sources(values: list[object]) -> list[dict[str, str]]:
         snippet = value.get("snippet")
         if not isinstance(title, str) or not isinstance(url, str):
             continue
-        source = {"title": _safe_text(title), "url": _safe_text(url)}
-        if isinstance(snippet, str):
-            source["snippet"] = _safe_text(snippet)
+        public_sources.append(
+            (
+                _safe_text(title),
+                _safe_text(url),
+                _safe_text(snippet) if isinstance(snippet, str) else None,
+            )
+        )
+    sources: list[dict[str, EvidenceText]] = []
+    for title, url, snippet in sorted(public_sources, key=lambda source: (source[1], source[0])):
+        source = {
+            "title": _summary_evidence(title, "web_title", policy, truncated_fields),
+            "url": _summary_evidence(url, "web_url", policy, truncated_fields),
+        }
+        if snippet is not None:
+            source["snippet"] = _summary_evidence(
+                snippet, "web_snippet", policy, truncated_fields
+            )
         sources.append(source)
-    return sorted(sources, key=lambda source: (source["url"], source["title"]))
+    return sources
+
+
+def _summary_evidence(
+    value: str, field: str, policy: CompressorPolicy, truncated_fields: list[str]
+) -> EvidenceText:
+    return _bounded_evidence(value, policy.max_summary_text_bytes, field, truncated_fields)
+
+
+def _deduplication_sha256(adapter: str, name: str, arguments: str) -> str:
+    parsed = _json_object(arguments)
+    safe_arguments: object = (
+        _safe_text(arguments) if parsed is None else _safe_identity_value(parsed)
+    )
+    payload = {"adapter": adapter, "name": name, "arguments": safe_arguments}
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _safe_identity_value(value: object, key: str | None = None) -> object:
+    if isinstance(value, str):
+        if key in {"file_path", "path"}:
+            return _safe_path_reference(value)
+        return _safe_text(value)
+    if isinstance(value, Mapping):
+        return {
+            str(child_key): _safe_identity_value(child_value, str(child_key))
+            for child_key, child_value in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, list):
+        return [_safe_identity_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _safe_text(str(value))
+
+
+def _safe_path_reference(value: str) -> str:
+    normalised = value.replace("\\", "/")
+    components = tuple(component for component in normalised.split("/") if component)
+    for index, component in enumerate(components):
+        if component.lower() == "agent-workspace" and index + 1 < len(components):
+            return "workspace/" + "/".join(components[index + 1 :])
+    if _ABSOLUTE_PATH_PATTERN.search(value):
+        basename = components[-1] if components else "unknown"
+        return "external/" + _safe_text(basename)
+    return _safe_text(normalised)
 
 
 def _copy_nonnegative(source: Mapping[str, object], destination: dict[str, Any], key: str) -> None:
@@ -727,25 +818,38 @@ def _signals(
         )
     grouped: dict[tuple[str, str], list[CompressedToolCall]] = defaultdict(list)
     for call in calls:
-        grouped[(call.name, call.arguments.sha256)].append(call)
-    for (name, _), group in sorted(grouped.items()):
+        deduplication_sha256 = call.summary.get("deduplication_sha256")
+        if not isinstance(deduplication_sha256, str):
+            raise AssertionError("compressed tool call is missing a deduplication hash")
+        grouped[(call.adapter, deduplication_sha256)].append(call)
+    for (adapter, _), group in sorted(grouped.items()):
         if len(group) > 1:
             signals.append(
                 TrajectorySignal(
                     kind="repeated_exact_tool_call",
                     count=len(group),
                     call_ids=tuple(call.call_id for call in group),
-                    detail={"tool_name": name},
+                    detail={"tool_adapter": adapter},
                 )
             )
-    failed_names = {call.name for call in failures}
-    recovered = [call for call in calls if call.name in failed_names and call.status == "succeeded"]
-    if recovered:
+    post_failure_successes = [
+        call
+        for call in calls
+        if call.status == "succeeded"
+        and any(
+            failed.adapter == call.adapter
+            and failed.result is not None
+            and failed.result.seq < call.call.seq
+            for failed in failures
+        )
+    ]
+    if post_failure_successes:
         signals.append(
             TrajectorySignal(
-                kind="failure_recovered",
-                count=len(recovered),
-                call_ids=tuple(call.call_id for call in recovered),
+                kind="post_failure_same_adapter_success",
+                count=len(post_failure_successes),
+                call_ids=tuple(call.call_id for call in post_failure_successes),
+                detail={"relationship": "temporal_only"},
             )
         )
     if len(calls) > policy.high_tool_call_count:
@@ -806,7 +910,9 @@ def _truncate_utf8(value: str, limit: int) -> str:
     return prefix + marker
 
 
-def _with_artifact_digest(artifact: CompressedTrajectory) -> CompressedTrajectory:
+def _with_artifact_digest(
+    artifact: CompressedTrajectory, policy: CompressorPolicy
+) -> CompressedTrajectory:
     current = artifact
     for _ in range(3):
         payload = canonical_json_bytes(current.model_dump(mode="json"))
@@ -816,6 +922,9 @@ def _with_artifact_digest(artifact: CompressedTrajectory) -> CompressedTrajector
         mode="json", exclude={"compression": {"artifact_sha256"}}
     )
     digest = hashlib.sha256(canonical_json_bytes(payload_without_digest)).hexdigest()
-    return current.model_copy(
+    final = current.model_copy(
         update={"compression": current.compression.model_copy(update={"artifact_sha256": digest})}
     )
+    if len(canonical_json_bytes(final.model_dump(mode="json"))) > policy.max_trajectory_bytes:
+        raise TrajectoryCompressionError("compressed trajectory exceeds size limit")
+    return final

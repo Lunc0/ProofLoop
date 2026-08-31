@@ -12,12 +12,14 @@ from skill_evolve.trajectory.compressor import (
     TrajectoryCompressionError,
     _bounded_evidence,
     _safe_text,
+    canonical_json_bytes,
 )
 from skill_evolve.trajectory.contracts import (
     CompressedTrajectory,
     EvolutionAgentInput,
     EvolutionCaseInput,
     TrustedContext,
+    TrustedText,
 )
 from skill_evolve.trajectory.policy import DEFAULT_COMPRESSOR_POLICY, CompressorPolicy
 
@@ -56,7 +58,7 @@ def build_evolution_agent_input(
         raise TrajectoryCompressionError("evaluated Skill exceeds agent-input size limit")
     ordered_cases = sorted(cases, key=_case_sort_key)
     agent_cases = tuple(_case_input(case, trajectory, policy) for case, trajectory in ordered_cases)
-    return EvolutionAgentInput(
+    agent_input = EvolutionAgentInput(
         manifest_sha256=manifest_sha256,
         environment_fingerprint=environment_fingerprint,
         subject=subject.public_binding(),
@@ -65,6 +67,10 @@ def build_evolution_agent_input(
         omitted_cases=tuple(sorted(omitted_cases, key=lambda item: item["case_id"])),
         policy_sha256=policy.sha256,
     )
+    agent_input_bytes = canonical_json_bytes(agent_input.model_dump(mode="json"))
+    if len(agent_input_bytes) > policy.max_agent_input_bytes:
+        raise TrajectoryCompressionError("Evolution agent input exceeds size limit")
+    return agent_input
 
 
 def _case_sort_key(item: tuple[LiveSQLBenchCase, CompressedTrajectory]) -> str:
@@ -82,7 +88,7 @@ def _case_input(
     )
     return EvolutionCaseInput(
         case_id=case.instance_id,
-        prompt=_safe_text(case.prompt),
+        prompt=_trusted_text(case.prompt, policy.max_prompt_bytes),
         task_contract=task_contract(True, subject_path="SKILL.md"),
         difficulty_tier=case.difficulty_tier,
         context=context,
@@ -92,8 +98,13 @@ def _case_input(
 
 def _trusted_context(role: str, path: Path, policy: CompressorPolicy) -> TrustedContext:
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(policy.max_context_source_bytes + 1)
+        if len(raw) > policy.max_context_source_bytes:
+            raise TrajectoryCompressionError(f"public {role} context exceeds source size limit")
         text = raw.decode("utf-8", errors="strict")
+    except TrajectoryCompressionError:
+        raise
     except (OSError, UnicodeDecodeError) as error:
         raise TrajectoryCompressionError(f"could not read public {role} context") from error
     safe = _safe_text(text)
@@ -105,6 +116,18 @@ def _trusted_context(role: str, path: Path, policy: CompressorPolicy) -> Trusted
         text=visible,
         original_bytes=len(encoded),
         truncated=len(visible.encode("utf-8")) < len(encoded),
+    )
+
+
+def _trusted_text(value: str, limit: int) -> TrustedText:
+    safe = _safe_text(value)
+    encoded = safe.encode("utf-8")
+    text = _truncate_utf8(safe, limit)
+    return TrustedText(
+        text=text,
+        sha256=hashlib.sha256(encoded).hexdigest(),
+        original_bytes=len(encoded),
+        truncated=len(text.encode("utf-8")) < len(encoded),
     )
 
 

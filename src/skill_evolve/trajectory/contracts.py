@@ -132,9 +132,18 @@ class TrustedContext(StrictTrajectoryModel):
     truncated: bool
 
 
+class TrustedText(StrictTrajectoryModel):
+    """Bounded text supplied by a benchmark-controlled public input."""
+
+    text: str
+    sha256: str
+    original_bytes: int = Field(ge=0)
+    truncated: bool
+
+
 class EvolutionCaseInput(StrictTrajectoryModel):
     case_id: str
-    prompt: str
+    prompt: TrustedText
     task_contract: str
     difficulty_tier: str
     context: tuple[TrustedContext, ...]

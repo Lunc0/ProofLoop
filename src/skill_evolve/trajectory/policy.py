@@ -16,8 +16,13 @@ class CompressorPolicy:
     max_assistant_text_bytes: int = 4_096
     max_tool_arguments_bytes: int = 4_096
     max_tool_result_bytes: int = 8_192
+    max_summary_text_bytes: int = 1_024
     max_context_bytes: int = 16_384
+    max_context_source_bytes: int = 1_048_576
+    max_prompt_bytes: int = 8_192
     max_skill_bytes: int = 24_576
+    max_trajectory_bytes: int = 524_288
+    max_agent_input_bytes: int = 2_097_152
     max_list_items: int = 20
     high_tool_call_count: int = 12
     high_total_tokens: int = 20_000

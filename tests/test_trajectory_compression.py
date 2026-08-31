@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
+import pytest
+
+from skill_evolve.benchmark.livesqlbench import LiveSQLBenchCase
 from skill_evolve.evaluator.core import CaseEvaluation, Verdict
 from skill_evolve.runner.contracts import AgentExecution, RunnerCaseOutput
-from skill_evolve.trajectory.compressor import canonical_json_bytes, compress_session_jsonl
+from skill_evolve.subject import RunSubject
+from skill_evolve.trajectory.agent_input import build_evolution_agent_input
+from skill_evolve.trajectory.compressor import (
+    TrajectoryCompressionError,
+    canonical_json_bytes,
+    compress_session_jsonl,
+)
+from skill_evolve.trajectory.policy import CompressorPolicy
 
 
 def test_complete_trajectory_pairs_cross_step_result_and_strips_reasoning() -> None:
@@ -134,12 +146,161 @@ def test_web_search_is_allowed_and_has_deterministic_summary() -> None:
     call = compressed.trajectory[0].tool_calls[0]
     assert call.adapter == "web_search"
     assert call.status == "succeeded"
-    assert call.summary["queries"] == ["PostgreSQL join"]
+    assert call.summary["untrusted_evidence"] is True
+    assert [query.text for query in call.summary["queries"]] == ["PostgreSQL join"]
     assert call.summary["retrieved_at_ms"] == 2
-    assert call.summary["sources"] == [
-        {"title": "A", "url": "https://a.example", "snippet": "first"},
-        {"title": "B", "url": "https://b.example", "snippet": "second"},
+    assert [
+        (source["title"].text, source["url"].text, source["snippet"].text)
+        for source in call.summary["sources"]
+    ] == [
+        ("A", "https://a.example", "first"),
+        ("B", "https://b.example", "second"),
     ]
+
+
+def test_file_path_summary_prevents_distinct_reads_being_deduplicated() -> None:
+    session = _jsonl(
+        _header(),
+        _tool_call(
+            1,
+            1,
+            1,
+            "read-schema",
+            "read",
+            '{"file_path":"D:\\\\custody\\\\agent-workspace\\\\case-1\\\\schema.sql"}',
+        ),
+        _tool_call(
+            2,
+            1,
+            2,
+            "read-task",
+            "read",
+            '{"file_path":"D:\\\\custody\\\\agent-workspace\\\\case-1\\\\TASK.md"}',
+        ),
+        _assistant(3, 1, 3, [{"type": "text", "text": "done"}]),
+        _turn_end(4, 1),
+    )
+
+    compressed = compress_session_jsonl(
+        session, _runner_case(), _evaluation(), runner_outcome="completed"
+    )
+
+    calls = [call for step in compressed.trajectory for call in step.tool_calls]
+    assert [call.summary["target"].text for call in calls] == [
+        "workspace/case-1/schema.sql",
+        "workspace/case-1/TASK.md",
+    ]
+    assert all(call.summary["untrusted_evidence"] is True for call in calls)
+    assert not any(signal.kind == "repeated_exact_tool_call" for signal in compressed.signals)
+
+
+def test_post_failure_signal_excludes_successes_before_the_failure() -> None:
+    session = _jsonl(
+        _header(),
+        _tool_call(1, 1, 1, "before", "pwsh", '{"command":"Get-ChildItem"}'),
+        _tool_result(2, 1, 1, "before", "ok", is_error=False),
+        _tool_call(3, 1, 2, "failed", "pwsh", '{"command":"Get-ChildItem"}'),
+        _tool_result(4, 1, 2, "failed", "failed", is_error=True),
+        _tool_call(5, 1, 3, "after", "pwsh", '{"command":"Get-ChildItem"}'),
+        _tool_result(6, 1, 3, "after", "ok", is_error=False),
+        _assistant(7, 1, 4, [{"type": "text", "text": "done"}]),
+        _turn_end(8, 1),
+    )
+
+    compressed = compress_session_jsonl(
+        session, _runner_case(), _evaluation(), runner_outcome="completed"
+    )
+
+    signal = next(
+        signal
+        for signal in compressed.signals
+        if signal.kind == "post_failure_same_adapter_success"
+    )
+    assert signal.call_ids == ("after",)
+    assert signal.detail == {"relationship": "temporal_only"}
+    assert not any(signal.kind == "failure_recovered" for signal in compressed.signals)
+
+
+def test_web_summary_text_is_bounded_and_marked_untrusted() -> None:
+    oversized_snippet = "x" * 2_000
+    session = _jsonl(
+        _header(),
+        _tool_call(1, 1, 1, "call-web", "web_search", '{"queries":["PostgreSQL join"]}'),
+        _tool_result(
+            2,
+            1,
+            1,
+            "call-web",
+            "result",
+            is_error=False,
+            meta={
+                "sources": [
+                    {
+                        "title": "title",
+                        "url": "https://example.test",
+                        "snippet": oversized_snippet,
+                    }
+                ]
+            },
+        ),
+        _assistant(3, 1, 2, [{"type": "text", "text": "done"}]),
+        _turn_end(4, 1),
+    )
+    policy = CompressorPolicy(max_summary_text_bytes=64)
+
+    compressed = compress_session_jsonl(
+        session, _runner_case(), _evaluation(), runner_outcome="completed", policy=policy
+    )
+
+    call = compressed.trajectory[0].tool_calls[0]
+    snippet = call.summary["sources"][0]["snippet"]
+    assert call.summary["untrusted_evidence"] is True
+    assert snippet.truncated is True
+    assert len(snippet.text.encode("utf-8")) <= policy.max_summary_text_bytes
+    assert "web_snippet" in compressed.compression.truncated_fields
+
+
+def test_evolution_input_bounds_prompt_and_context_source(tmp_path: Path) -> None:
+    case = _evolution_case(tmp_path, prompt="prompt " * 30)
+    trajectory = compress_session_jsonl(
+        _jsonl(
+            _header(),
+            _assistant(1, 1, 1, [{"type": "text", "text": "done"}]),
+            _turn_end(2, 1),
+        ),
+        RunnerCaseOutput(case_id=case.instance_id, status="completed", trajectory=()),
+        _evaluation(case_id=case.instance_id),
+        runner_outcome="completed",
+    )
+    subject = _subject("skill")
+    policy = CompressorPolicy(max_prompt_bytes=32, max_context_source_bytes=64)
+
+    agent_input = build_evolution_agent_input(
+        "manifest", "environment", subject, ((case, trajectory),), policy=policy
+    )
+
+    prompt = agent_input.trajectories[0].prompt
+    assert prompt.truncated is True
+    assert len(prompt.text.encode("utf-8")) <= policy.max_prompt_bytes
+
+    with pytest.raises(
+        TrajectoryCompressionError, match="Evolution agent input exceeds size limit"
+    ):
+        build_evolution_agent_input(
+            "manifest",
+            "environment",
+            subject,
+            ((case, trajectory),),
+            policy=CompressorPolicy(max_agent_input_bytes=1),
+        )
+
+    case.schema_file.write_text("x" * 65, encoding="utf-8")
+    with pytest.raises(
+        TrajectoryCompressionError, match="schema context exceeds source size limit"
+    ):
+        build_evolution_agent_input(
+            "manifest", "environment", subject, ((case, trajectory),), policy=policy
+        )
 
 
 def _runner_case() -> RunnerCaseOutput:
@@ -152,9 +313,9 @@ def _runner_case() -> RunnerCaseOutput:
     )
 
 
-def _evaluation(verdict: Verdict = Verdict.PASS) -> CaseEvaluation:
+def _evaluation(verdict: Verdict = Verdict.PASS, *, case_id: str = "case-1") -> CaseEvaluation:
     return CaseEvaluation(
-        case_id="case-1",
+        case_id=case_id,
         slice="Query",
         prompt="public prompt",
         verdict=verdict,
@@ -244,4 +405,32 @@ def _jsonl(*events: dict[str, object]) -> bytes:
     return b"".join(
         json.dumps(event, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n"
         for event in events
+    )
+
+
+def _subject(content: str) -> RunSubject:
+    encoded = content.encode("utf-8")
+    return RunSubject(
+        subject_id="subject",
+        content_sha256=hashlib.sha256(encoded).hexdigest(),
+        content=encoded,
+    )
+
+
+def _evolution_case(tmp_path: Path, *, prompt: str) -> LiveSQLBenchCase:
+    context_names = ("schema.sql", "knowledge.json", "columns.json")
+    context_paths = tuple(tmp_path / name for name in context_names)
+    for path in context_paths:
+        path.write_text("public context", encoding="utf-8")
+    return LiveSQLBenchCase(
+        instance_id="case-1",
+        database_name="database",
+        prompt=prompt,
+        schema_file=context_paths[0],
+        knowledge_file=context_paths[1],
+        column_meaning_file=context_paths[2],
+        gold_sql="PRIVATE GOLD",
+        required_knowledge_ids=(),
+        order_matters=True,
+        difficulty_tier="Simple",
     )
