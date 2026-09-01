@@ -48,6 +48,18 @@ provider route 必须使用 `apiKeyEnv` 这类环境变量引用，不能把 API
 在当前 DSH `0.1.1-rc.2` 的 headless public protocol 中，这个覆盖只负责 provider/model 选择；
 `environment.model.params` 仍会进入环境指纹，但不能被视为已传递给 DSH provider 的请求参数。
 
+### SQL benchmark 的 DSH Web 工具
+
+仓库中的 `examples/sql-agent/experiment.dsh.yaml` 通过同目录
+`dsh-no-web.patch.yml` 将 DSH `tool-web` 的 `search` 与 `fetch` 都设为 `false`。因此经该示例 manifest
+启动的 headless DSH 不会向模型注册 `web_search` 或 `web_fetch`；它不能通过该官方工具检索
+LiveSQLBench、Hugging Face 或其他公开 benchmark 材料。
+
+`environment.tools` 不是 DSH runtime 工具 allowlist，不能单独用于关闭 DSH 内建工具。真实 Final 的私有
+manifest 不随 Git 分发，受信任 evaluator 必须在其受控 manifest workspace 中复制并显式引用同一 patch。
+该 patch 只删除 DSH web 工具，不限制 `pwsh` 的网络访问，也不隔离调用账户可读取的本机文件；这些边界仍需
+OS 访问控制和网络出口策略。
+
 ## 新机器运行
 
 1. 安装 DSH、Docker Desktop、Python 3.11+ 和 `uv`。

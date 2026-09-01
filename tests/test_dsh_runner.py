@@ -19,6 +19,7 @@ from skill_evolve.candidate import (
     subject_from_candidate,
 )
 from skill_evolve.candidate.store import skill_sha256_for_source
+from skill_evolve.config import load_manifest
 from skill_evolve.config.models import CaseConfig, DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     ReadOnlyDatabaseAccess,
@@ -59,6 +60,36 @@ def _config() -> DshConfig:
 
 def _model() -> ModelConfig:
     return ModelConfig(provider="deepseek-official", name="deepseek-v4-flash")
+
+
+def test_example_dsh_manifest_disables_web_tools_in_dsh_invocation() -> None:
+    repository_root = Path(__file__).parents[1]
+    manifest_path = repository_root / "examples" / "sql-agent" / "experiment.dsh.yaml"
+    resolved = load_manifest(manifest_path)
+
+    assert resolved.profile_patch is not None
+    assert yaml.safe_load(resolved.profile_patch.read_text(encoding="utf-8")) == [
+        {
+            "id": "tool-web",
+            "config": {
+                "search": False,
+                "fetch": False,
+            },
+        }
+    ]
+
+    command = DshRunner(
+        resolved.manifest.environment.dsh,
+        resolved.profile_patch,
+        resolved.manifest.environment.model,
+    )._command_for(resolved.manifest.cases[0])
+    profile_index = command.index("--profile")
+    assert command[profile_index : profile_index + 4] == [
+        "--profile",
+        "headless",
+        "--patch",
+        str(resolved.profile_patch),
+    ]
 
 
 def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(

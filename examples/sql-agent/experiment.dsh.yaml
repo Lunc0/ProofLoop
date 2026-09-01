@@ -10,6 +10,7 @@ environment:
   dsh:
     version: 0.1.1-rc.2
     profile: headless
+    profile_patch: dsh-no-web.patch.yml
     runner: dsh
     binary: dsh
     runner_args: []
