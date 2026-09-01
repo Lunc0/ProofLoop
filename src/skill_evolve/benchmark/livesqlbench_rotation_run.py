@@ -30,8 +30,11 @@ from skill_evolve.benchmark.livesqlbench_run import (
     _run_case,
     _write_runner_artifacts,
 )
-from skill_evolve.config.models import DshConfig, ModelConfig
+from skill_evolve.config.models import DshConfig, ModelConfig, OptimizerConfig
 from skill_evolve.evaluator.core import CaseEvaluation, Verdict
+from skill_evolve.optimizer.client import OptimizerClient
+from skill_evolve.optimizer.contracts import OptimizationResult
+from skill_evolve.optimizer.service import advise_after_evolution
 from skill_evolve.registry.store import RunDirectory, RunStore
 from skill_evolve.runner.contracts import (
     RawArtifact,
@@ -90,6 +93,9 @@ def run_rotation_dsh_suite(
     model: ModelConfig,
     runs_root: Path,
     subject: RunSubject | None,
+    optimizer: OptimizerConfig | None = None,
+    *,
+    optimizer_client: OptimizerClient | None = None,
 ) -> RotationRunOutcome:
     """Run one frozen rolling manifest without interpreting failures as Skill actions."""
 
@@ -100,9 +106,12 @@ def run_rotation_dsh_suite(
     if suite.kind == "evolution" and not has_successful_smoke_gate(suite.custody, subject):
         raise RotationRunError("Evolution requires a successful Smoke gate for this RunSubject")
 
+    active_optimizer = optimizer if optimizer is not None else OptimizerConfig()
     environment_fingerprint = _environment_fingerprint(suite, dsh_config, model, subject)
     run = RunStore(runs_root).create()
-    _write_initial_evidence(run, suite, dsh_config, model, environment_fingerprint, subject)
+    _write_initial_evidence(
+        run, suite, dsh_config, model, active_optimizer, environment_fingerprint, subject
+    )
     evaluations: list[CaseEvaluation] = []
     runner_cases: list[RunnerCaseOutput] = []
     trajectories: list[dict[str, Any]] = []
@@ -165,8 +174,24 @@ def run_rotation_dsh_suite(
     comparison_key = (
         _comparison_key(suite, dsh_config, model) if suite.kind == "evolution" else None
     )
+    optimizer_result: OptimizationResult | None = None
+    if suite.kind == "evolution":
+        optimizer_result = advise_after_evolution(
+            run,
+            subject,
+            active_optimizer,
+            run_status=status,
+            client=optimizer_client,
+        )
     outcome = _write_final_evidence(
-        run, suite, status, environment_fingerprint, comparison_key, tuple(evaluations), subject
+        run,
+        suite,
+        status,
+        environment_fingerprint,
+        comparison_key,
+        tuple(evaluations),
+        subject,
+        optimizer_result,
     )
     if suite.kind == "smoke" and status == "passed":
         _write_smoke_gate(
@@ -324,6 +349,7 @@ def _write_initial_evidence(
     suite: RotationLiveSQLBenchSuite,
     dsh_config: DshConfig,
     model: ModelConfig,
+    optimizer: OptimizerConfig,
     environment_fingerprint: str,
     subject: RunSubject,
 ) -> None:
@@ -335,6 +361,7 @@ def _write_initial_evidence(
             "benchmark": suite.public_summary(),
             "dsh": dsh_config.model_dump(mode="json"),
             "model": model.model_dump(mode="json"),
+            "optimizer": optimizer.model_dump(mode="json"),
             "evaluator": {"version": _EVALUATOR_VERSION},
             "subject": binding,
         },
@@ -362,6 +389,7 @@ def _write_final_evidence(
     comparison_key: str | None,
     evaluations: tuple[CaseEvaluation, ...],
     subject: RunSubject,
+    optimizer_result: OptimizationResult | None,
 ) -> RotationRunOutcome:
     public_evaluations = [public_evaluation_dict(item) for item in evaluations]
     tier_metrics = _tier_metrics(suite, evaluations)
@@ -384,6 +412,15 @@ def _write_final_evidence(
     }
     if comparison_key is not None:
         result["comparison_key"] = comparison_key
+    if optimizer_result is not None:
+        receipt = optimizer_result.receipt
+        result["optimizer"] = {
+            "status": receipt.status,
+            "advice_path": optimizer_result.advice_path,
+            "provider": receipt.provider,
+            "model": receipt.model,
+            "prompt_version": receipt.prompt_version,
+        }
     run.write_json("evaluation.json", {"cases": public_evaluations})
     run.write_json("result.json", result)
     run.write_text("report.md", _neutral_report(run.run_id, status, tier_metrics, comparison_key))

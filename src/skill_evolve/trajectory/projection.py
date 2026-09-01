@@ -221,6 +221,8 @@ def project_evidence_v3(
             )
             claimed_post_failure_actions.update(claimed)
             items.append((index, episode))
+        elif observed.call.adapter == "read":
+            continue
         elif (
             index not in claimed_post_failure_actions and index not in subject_read_indices
         ):
@@ -713,9 +715,9 @@ def _action_parameters(call: CompressedToolCall, policy: CompressorPolicy) -> di
     try:
         parsed = json.loads(call.arguments.text)
     except json.JSONDecodeError:
-        return {"argument_excerpt": _limit(call.arguments.text, policy.max_projection_text_bytes)}
+        return _unstructured_action_parameters(call)
     if not isinstance(parsed, dict):
-        return {"argument_excerpt": _limit(call.arguments.text, policy.max_projection_text_bytes)}
+        return _unstructured_action_parameters(call)
     permitted = ("command", "description", "limit", "offset", "pattern", "query", "queries")
     result: dict[str, Any] = {}
     for key in permitted:
@@ -733,6 +735,13 @@ def _action_parameters(call: CompressedToolCall, policy: CompressorPolicy) -> di
                 _limit(_safe_text(item), policy.max_projection_text_bytes) for item in value
             ]
     return result or {"argument_shape": "structured"}
+
+
+def _unstructured_action_parameters(call: CompressedToolCall) -> dict[str, Any]:
+    argument_sha256 = call.summary.get("arguments_sha256")
+    if isinstance(argument_sha256, str):
+        return {"argument_sha256": argument_sha256}
+    return {"argument_shape": "unstructured"}
 
 
 def _sql_query(call: CompressedToolCall) -> str | None:

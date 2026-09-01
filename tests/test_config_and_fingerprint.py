@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from skill_evolve.candidate import CandidateService, LocalCandidateStore
 from skill_evolve.config import ManifestError, load_manifest
-from skill_evolve.config.models import DshConfig
+from skill_evolve.config.models import DshConfig, OptimizerConfig
 from skill_evolve.fingerprint import create_snapshot
 from skill_evolve.runner.contracts import RawArtifact
 from tests.conftest import write_experiment
@@ -135,6 +135,25 @@ def test_dsh_runner_args_reject_credential_options() -> None:
             runner="dsh",
             runner_args=("--api-key", "not-a-secret-here"),
         )
+
+
+def test_optimizer_key_reference_is_not_treated_as_a_literal_secret(tmp_path) -> None:
+    manifest_path = write_experiment(tmp_path)
+    content = manifest_path.read_text(encoding="utf-8").replace(
+        "  evaluator:\n",
+        """  optimizer:
+    enabled: true
+    provider: deepseek
+    model: deepseek-v4-flash
+    api_key_env: DEEPSEEK_API_KEY
+  evaluator:
+""",
+    )
+    manifest_path.write_text(content, encoding="utf-8")
+
+    resolved = load_manifest(manifest_path)
+
+    assert resolved.manifest.environment.optimizer == OptimizerConfig(enabled=True)
 
 
 @pytest.mark.parametrize("path", ("../outside.log", "dsh\\windows.log", "/absolute.log"))

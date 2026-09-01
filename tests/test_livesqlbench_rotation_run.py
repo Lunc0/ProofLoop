@@ -25,7 +25,8 @@ from skill_evolve.benchmark.livesqlbench_rotation_run import (
     has_successful_smoke_gate,
     run_rotation_dsh_suite,
 )
-from skill_evolve.config.models import DshConfig, ModelConfig
+from skill_evolve.config.models import DshConfig, ModelConfig, OptimizerConfig
+from skill_evolve.optimizer.client import OptimizerClientResponse
 from skill_evolve.runner.contracts import (
     AgentExecution,
     RawArtifact,
@@ -73,6 +74,36 @@ class StubQueryService:
     @property
     def endpoint(self) -> str:
         return "http://127.0.0.1:54321/query"
+
+
+class AdviceFakeClient:
+    def __init__(self, case_id: str) -> None:
+        self.case_id = case_id
+        self.calls: list[tuple[str, str]] = []
+
+    def advise(
+        self, system_prompt: str, user_prompt: str, config: OptimizerConfig
+    ) -> OptimizerClientResponse:
+        del config
+        self.calls.append((system_prompt, user_prompt))
+        return OptimizerClientResponse(
+            json.dumps(
+                {
+                    "schema_version": "skill-optimization-advice-v1",
+                    "summary": "A failed task has bounded evidence.",
+                    "suggestions": [
+                        {
+                            "evidence_case_ids": [self.case_id],
+                            "observation": "No SQL was submitted.",
+                            "suggested_change": "Add a submission check.",
+                            "suggested_markdown_fragment": (
+                                "- Confirm a single SQL statement is submitted."
+                            ),
+                        }
+                    ],
+                }
+            )
+        )
 
 
 class PassingStubDshRunner:
@@ -233,6 +264,64 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
             tmp_path / "runs",
             failing_subject,
         )
+
+
+def test_enabled_optimizer_runs_after_evolution_failure_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke_suite, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    subject = _subject("optimizer")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+    optimizer = OptimizerConfig(enabled=True)
+    fake = AdviceFakeClient(evolution_suite.cases[0].instance_id)
+
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", PassingStubDshRunner
+    )
+    smoke = run_rotation_dsh_suite(
+        smoke_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        optimizer,
+        optimizer_client=fake,
+    )
+    assert smoke.status == "passed"
+    assert fake.calls == []
+    assert "optimizer" not in smoke.public_result
+
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", TaskFailureStubDshRunner
+    )
+    evolution = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        optimizer,
+        optimizer_client=fake,
+    )
+
+    assert evolution.status == "task_failure"
+    assert len(fake.calls) == 1
+    assert evolution.public_result["optimizer"] == {
+        "status": "proposed",
+        "advice_path": "optimizer/advice.json",
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "prompt_version": "skill-optimization-advice-prompt-v1",
+    }
+    assert (evolution.run.path / "optimizer" / "advice.json").is_file()
+    assert (evolution.run.path / "optimizer" / "receipt.json").is_file()
 
 
 def _prepare_suites(

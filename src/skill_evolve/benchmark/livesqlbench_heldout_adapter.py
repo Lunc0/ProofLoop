@@ -21,7 +21,7 @@ from skill_evolve.benchmark.livesqlbench_heldout_run import (
     HeldOutLiveSQLBenchRunError,
     run_heldout_dsh_suite,
 )
-from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig
+from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig, OptimizerConfig
 from skill_evolve.runner.contracts import RunnerOutput
 from skill_evolve.sql import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.subject import RunSubject
@@ -91,10 +91,11 @@ class LiveSQLBenchBaseLiteHeldOutAdapter:
         model: ModelConfig,
         runs_root: Path,
         subject: RunSubject | None = None,
+        optimizer: OptimizerConfig | None = None,
     ) -> BenchmarkRunResult:
         """Run only below custody; the ordinary workspace run root is intentionally ignored."""
 
-        del runs_root
+        del optimizer, runs_root
         try:
             outcome = run_heldout_dsh_suite(
                 _suite(suite), dsh_config, profile_patch, model, subject

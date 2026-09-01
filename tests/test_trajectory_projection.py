@@ -194,6 +194,47 @@ def test_v3_projection_selects_context_and_keeps_failure_episode(tmp_path: Path)
     assert '"UNUSED"' not in selected_context["knowledge"].text
 
 
+def test_v3_projection_excludes_read_targets_and_redacts_prefixed_windows_paths(
+    tmp_path: Path,
+) -> None:
+    case = _case(tmp_path)
+    session = _jsonl(
+        _header(),
+        _tool_call(
+            1,
+            1,
+            1,
+            "read-session",
+            "read",
+            '{"path":"prefixC:\\\\custody\\\\case.session.jsonl"}',
+        ),
+        _tool_result(2, 1, 1, "read-session", "local session evidence"),
+        _tool_call(3, 1, 2, "bad", "sql-readonly", '{"query":"SELECT 1; SELECT 2"}'),
+        _tool_result(4, 1, 2, "bad", "multiple SQL statements are not allowed"),
+        _tool_call(
+            5,
+            1,
+            3,
+            "post-failure",
+            "pwsh",
+            "Get-Content prefixC:\\custody\\case.session.jsonl",
+        ),
+        _tool_result(6, 1, 3, "post-failure", "ok"),
+        _turn_end(7, 1),
+    )
+
+    projected_case = _projected_case(case, _subject(), session, runner_outcome="completed")
+    payload = canonical_json_bytes(projected_case.model_dump(mode="json")).decode("utf-8")
+
+    assert ".session.jsonl" not in payload
+    assert "C:\\\\custody" not in payload
+    assert "file_read" not in {item.kind for item in projected_case.evidence}
+    episode = next(
+        item for item in projected_case.evidence if item.kind == "failure_recovery_episode"
+    )
+    assert "argument_sha256" in episode.post_failure_actions[0].detail["action"]
+
+
 def test_v3_failure_episode_uses_result_boundary_and_strict_step_context(
     tmp_path: Path,
 ) -> None:

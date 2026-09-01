@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from skill_evolve.config.dotenv import read_dotenv_value
 from skill_evolve.config.models import DshConfig
 
 DSH_BINARY_ENV = "SKILL_EVOLVE_DSH_BINARY"
@@ -26,10 +27,11 @@ def resolve_dsh_config(
     """
 
     environment = os.environ if environ is None else environ
-    binary = environment.get(DSH_BINARY_ENV) or _read_dotenv_value(workspace, DSH_BINARY_ENV)
+    dotenv_path = workspace / ".env"
+    binary = environment.get(DSH_BINARY_ENV) or read_dotenv_value(dotenv_path, DSH_BINARY_ENV)
     session_log_root = (
         environment.get(DSH_SESSION_LOG_ROOT_ENV)
-        or _read_dotenv_value(workspace, DSH_SESSION_LOG_ROOT_ENV)
+        or read_dotenv_value(dotenv_path, DSH_SESSION_LOG_ROOT_ENV)
         or config.session_log_root
         or str(Path.home() / ".dsh" / "sessions")
     )
@@ -37,24 +39,3 @@ def resolve_dsh_config(
     if binary is not None:
         updates["binary"] = binary
     return DshConfig.model_validate(config.model_dump(mode="python") | updates)
-
-
-def _read_dotenv_value(workspace: Path, key: str) -> str | None:
-    """Read one exact non-secret key without expanding or loading the full dotenv file."""
-
-    dotenv_path = workspace / ".env"
-    if not dotenv_path.is_file():
-        return None
-    with dotenv_path.open(encoding="utf-8") as dotenv_file:
-        for line in dotenv_file:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            declared_key, raw_value = stripped.split("=", maxsplit=1)
-            if declared_key.strip().removeprefix("export ").strip() != key:
-                continue
-            value = raw_value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            return value
-    return None

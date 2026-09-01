@@ -13,6 +13,12 @@ from skill_evolve.config.models import CaseConfig, ExperimentManifest
 from skill_evolve.config.runtime import resolve_dsh_config
 
 SENSITIVE_KEY_FRAGMENTS = ("api_key", "password", "secret", "token", "authorization")
+SAFE_SECRET_REFERENCE_PATHS = frozenset(
+    {
+        ("environment", "optimizer", "api_key_env"),
+        ("environment", "optimizer", "max_output_tokens"),
+    }
+)
 
 
 class ManifestError(ValueError):
@@ -129,11 +135,15 @@ def _reject_secrets(value: Any, path: tuple[str, ...] = ()) -> None:
         for key, nested_value in value.items():
             if not isinstance(key, str):
                 raise ManifestError("manifest keys must be strings")
+            key_path = (*path, key)
             key_normalized = key.lower()
-            if any(fragment in key_normalized for fragment in SENSITIVE_KEY_FRAGMENTS):
-                dotted_path = ".".join((*path, key))
+            if (
+                key_path not in SAFE_SECRET_REFERENCE_PATHS
+                and any(fragment in key_normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
+            ):
+                dotted_path = ".".join(key_path)
                 raise ManifestError(f"manifest must not contain secrets: {dotted_path}")
-            _reject_secrets(nested_value, (*path, key))
+            _reject_secrets(nested_value, key_path)
     elif isinstance(value, list):
         for index, nested_value in enumerate(value):
             _reject_secrets(nested_value, (*path, str(index)))

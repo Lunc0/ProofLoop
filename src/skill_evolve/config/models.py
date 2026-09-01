@@ -106,12 +106,28 @@ class EvaluatorConfig(StrictModel):
     timeout_ms: int = Field(default=5000, ge=1, le=300_000)
 
 
+class OptimizerConfig(StrictModel):
+    """Non-secret settings for the optional Evolution-only advice call."""
+
+    enabled: bool = False
+    provider: Literal["deepseek"] = "deepseek"
+    model: Literal["deepseek-v4-flash"] = "deepseek-v4-flash"
+    api_key_env: Literal["DEEPSEEK_API_KEY"] = "DEEPSEEK_API_KEY"
+    timeout_ms: int = Field(default=30_000, ge=1_000, le=300_000)
+    max_output_tokens: int = Field(default=2_000, ge=64, le=16_384)
+    max_input_bytes: int = Field(default=524_288, ge=1_024, le=2_097_152)
+    prompt_version: Literal["skill-optimization-advice-prompt-v1"] = (
+        "skill-optimization-advice-prompt-v1"
+    )
+
+
 class EnvironmentConfig(StrictModel):
     model: ModelConfig
     dsh: DshConfig
     tools: tuple[ToolConfig, ...]
     database: DatabaseConfig
     evaluator: EvaluatorConfig
+    optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
 
     @field_validator("tools")
     @classmethod

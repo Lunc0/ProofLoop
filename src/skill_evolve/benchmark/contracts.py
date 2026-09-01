@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
-from skill_evolve.config.models import DshConfig, ModelConfig
+from skill_evolve.config.models import DshConfig, ModelConfig, OptimizerConfig
 from skill_evolve.runner.contracts import RunnerOutput
 from skill_evolve.subject import RunSubject
 
@@ -81,4 +81,5 @@ class BenchmarkAdapter(Protocol):
         model: ModelConfig,
         runs_root: Path,
         subject: RunSubject | None = None,
+        optimizer: OptimizerConfig | None = None,
     ) -> BenchmarkRunResult: ...

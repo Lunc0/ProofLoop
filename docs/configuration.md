@@ -5,11 +5,11 @@
 | 文件 | 是否提交 | 用途 |
 |---|---|---|
 | `examples/sql-agent/experiment.dsh.yaml` | 是 | 定义可比较的实验：模型标识、DSH profile、fixture、题集和 evaluator。 |
-| `examples/sql-agent/.env.example` | 是 | 本机配置模板；不含任何秘密。 |
-| `examples/sql-agent/.env` | 否 | 每台电脑的非敏感 DSH executable / session-log 路径覆盖。 |
+| `.env.example` | 是 | 根目录本机配置模板；不含任何秘密。 |
+| `.env` | 否 | 根目录的本机 DeepSeek optimizer 凭据；也可在 manifest workspace 放置非敏感 DSH 路径覆盖。 |
 
-`experiment.dsh.yaml` 说明“评测什么”；`.env` 说明“这台电脑如何连接并启动 DSH”。不要将 API Key、
-token、密码、连接串或生产数据库信息放入 manifest。
+`experiment.dsh.yaml` 说明“评测什么”。不要将 API Key、token、密码、连接串或生产数据库信息放入
+manifest；本地 optimizer 凭据只能放在根目录 Git 忽略的 `.env` 或进程环境变量。
 
 ## 支持的本机变量
 
@@ -60,10 +60,58 @@ manifest 不随 Git 分发，受信任 evaluator 必须在其受控 manifest wor
 该 patch 只删除 DSH web 工具，不限制 `pwsh` 的网络访问，也不隔离调用账户可读取的本机文件；这些边界仍需
 OS 访问控制和网络出口策略。
 
+## Evolution 自动优化建议（v0.9）
+
+仅 Evolution 可在完成评测后自动调用一次无工具的 DeepSeek 优化器；Smoke、Final、held-out、固定题集和
+runner/evaluator 无效的运行绝不会调用它。需要在该运行使用的 manifest 中显式启用：
+
+```yaml
+environment:
+  optimizer:
+    enabled: true
+    provider: deepseek
+    model: deepseek-v4-flash
+    api_key_env: DEEPSEEK_API_KEY
+```
+
+`api_key_env`（DSH settings 中常写作 `apiKeyEnv`）是环境变量**名称**，不是密钥值。优化器按以下顺序
+读取 `DEEPSEEK_API_KEY`：启动 `skill-evolve` 的非空进程环境变量、当前工作目录 Git 忽略的 `.env`。
+它只读取这一键到内存，不修改 `os.environ`，也不会将值写入 manifest、run artifact、candidate store、
+异常或 stdout。未启用或该变量不可用时，Evolution 评测仍照常结束，run 只写 optimizer 的 `unavailable`
+receipt，不会进行网络请求。
+
+首次使用时，在仓库根目录执行：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+随后使用本机编辑器在 `.env` 填写 `DEEPSEEK_API_KEY` 的值。此 `.env` 只供本地 optimizer 使用；DSH
+评测的 provider 凭据仍应保留在 DSH credential store 或受控进程环境，不能放入 manifest workspace。
+
+在有效失败 evidence 可用时，程序只向 DeepSeek 提供已校验的
+`agent-input/trajectory.json`（`evolution-coding-agent-input-v3`），不提供 `raw/dsh/`、原始 stderr、GT、
+Gold、custody 路径或任何凭据。建议产物保留在该次 run 的 `optimizer/advice.json`、`optimizer/advice.md`
+与 `optimizer/receipt.json`；`result.json` 仅记录状态、相对路径和非机密的 provider/model/prompt 标识。
+建议不会改写、导入、选择或晋级 candidate。
+
+若某次 Evolution 已完成，也可明确指定其 run ID 生成一次建议，而不重跑评测：
+
+```powershell
+uv run skill-evolve optimizer advise <run-id>
+```
+
+该命令只接受当前工作目录 `runs/` 下的已完成 Evolution run；会验证其固化 subject 和 v3
+agent input，并更新该 run 的 `optimizer/` artifact 与 `result.json` 摘要。显式命令本身即是
+调用授权，所以不要求原始 manifest 曾设置 `optimizer.enabled: true`，但仍需要进程环境中的
+`DEEPSEEK_API_KEY` 或当前工作目录 `.env` 中的同名值。它不执行 DSH、Docker、数据库、evaluator 或 candidate 操作，也不在
+stdout 输出 Skill、evidence 或建议正文。
+
 ## 新机器运行
 
 1. 安装 DSH、Docker Desktop、Python 3.11+ 和 `uv`。
-2. 复制 `examples/sql-agent/.env.example` 为同目录 `.env`，或者在 DSH credential store 配置 provider。
+2. 如需 Evolution optimizer，复制根目录 `.env.example` 为 `.env`，在本机填写 `DEEPSEEK_API_KEY`；DSH
+   provider 则配置在 DSH credential store。
 3. 必要时设置 `SKILL_EVOLVE_DSH_BINARY`。
 4. 运行：
 

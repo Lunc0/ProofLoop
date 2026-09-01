@@ -22,7 +22,7 @@ from skill_evolve.benchmark.livesqlbench_rotation_run import (
     RotationRunError,
     run_rotation_dsh_suite,
 )
-from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig
+from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig, OptimizerConfig
 from skill_evolve.runner.contracts import RunnerOutput
 from skill_evolve.sql import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.subject import RunSubject
@@ -87,6 +87,7 @@ class _RotationAdapter:
         model: ModelConfig,
         runs_root: Path,
         subject: RunSubject | None = None,
+        optimizer: OptimizerConfig | None = None,
     ) -> BenchmarkRunResult:
         try:
             outcome = run_rotation_dsh_suite(
@@ -96,6 +97,7 @@ class _RotationAdapter:
                 model,
                 runs_root,
                 subject,
+                optimizer,
             )
         except RotationRunError as error:
             raise BenchmarkAdapterError(str(error)) from error

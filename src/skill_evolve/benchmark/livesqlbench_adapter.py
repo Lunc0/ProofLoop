@@ -25,7 +25,7 @@ from skill_evolve.benchmark.livesqlbench_run import (
     LiveSQLBenchRunError,
     run_base_lite_dsh_suite,
 )
-from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig
+from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig, OptimizerConfig
 from skill_evolve.runner.contracts import RunnerCaseOutput, RunnerOutput
 from skill_evolve.sql import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.subject import RunSubject
@@ -120,7 +120,9 @@ class LiveSQLBenchBaseLiteAdapter:
         model: ModelConfig,
         runs_root: Path,
         subject: RunSubject | None = None,
+        optimizer: OptimizerConfig | None = None,
     ) -> BenchmarkRunResult:
+        del optimizer
         try:
             outcome = run_base_lite_dsh_suite(
                 _suite(suite), dsh_config, profile_patch, model, runs_root, subject

@@ -54,7 +54,7 @@ _IGNORED_EVENT_TYPES = frozenset(
     }
 )
 _ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(?i)(?:\b[A-Z]:[\\/][^\s\"']+|/(?:Users|home|var|tmp)/[^\s\"']+)"
+    r"(?i)(?:[A-Z]:(?:\\|/(?!/))[^\s\"']+|/(?:Users|home|var|tmp)/[^\s\"']+)"
 )
 _PRIVATE_RESULT_LINE_PATTERN = re.compile(
     r"(?im)^.*\b(?:gold|gt|expected)[ _-]?(?:sql|query|result)\b.*$"

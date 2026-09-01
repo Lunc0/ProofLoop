@@ -10,6 +10,7 @@ import typer
 from pydantic import ValidationError
 
 from skill_evolve.benchmark import (
+    LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
     BenchmarkAdapter,
     BenchmarkAdapterError,
     BenchmarkFixtureError,
@@ -38,8 +39,10 @@ from skill_evolve.candidate import (
 )
 from skill_evolve.candidate.store import skill_sha256_for_source
 from skill_evolve.config import ManifestError, load_manifest
+from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.fingerprint import create_snapshot
-from skill_evolve.registry import RunNotFoundError, RunStore
+from skill_evolve.optimizer.service import advise_after_evolution
+from skill_evolve.registry import RunDirectory, RunNotFoundError, RunStore
 from skill_evolve.runner.contracts import RunnerOutput
 from skill_evolve.subject import RunSubject
 from skill_evolve.workflow import run_experiment
@@ -48,11 +51,16 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 benchmark_app = typer.Typer(add_completion=False, no_args_is_help=True)
 livesqlbench_app = typer.Typer(add_completion=False, no_args_is_help=True)
 candidate_app = typer.Typer(add_completion=False, no_args_is_help=True)
+optimizer_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(candidate_app, name="candidate")
+app.add_typer(optimizer_app, name="optimizer")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(livesqlbench_app, name="livesqlbench")
 
 _LIVE_SQL_BENCH_ADAPTER_ID = "livesqlbench-base-lite"
+_EVOLUTION_RUN_STATUSES = frozenset(
+    {"passed", "task_failure", "runner_invalid", "evaluator_invalid"}
+)
 
 
 @app.command()
@@ -124,6 +132,38 @@ def rerun(
     )
     if outcome.exit_code:
         raise typer.Exit(outcome.exit_code)
+
+
+@optimizer_app.command("advise")
+def advise_optimizer(run_id: str) -> None:
+    """Generate one LLM advice artifact for an existing Evolution run only."""
+
+    try:
+        run = RunStore(_runs_root()).open(run_id)
+        subject, run_status, result = _load_evolution_advice_context(run)
+        optimizer_result = advise_after_evolution(
+            run,
+            subject,
+            OptimizerConfig(enabled=True),
+            run_status=run_status,
+        )
+    except (RunNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        _exit_with_error(str(error), 64)
+    receipt = optimizer_result.receipt
+    result["optimizer"] = {
+        "status": receipt.status,
+        "advice_path": optimizer_result.advice_path,
+        "provider": receipt.provider,
+        "model": receipt.model,
+        "prompt_version": receipt.prompt_version,
+    }
+    run.write_json("result.json", result)
+    _echo_json(
+        {
+            "run_id": run.run_id,
+            "optimizer": result["optimizer"],
+        }
+    )
 
 
 @benchmark_app.command("validate")
@@ -352,12 +392,68 @@ def _run_adapter_dsh(
             dsh_resolved.manifest.environment.model,
             _runs_root(),
             subject,
+            dsh_resolved.manifest.environment.optimizer,
         )
     except (BenchmarkAdapterError, ManifestError) as error:
         _exit_with_error(str(error), 64)
     _echo_run_result(result)
     if result.exit_code:
         raise typer.Exit(result.exit_code)
+
+
+def _load_evolution_advice_context(
+    run: RunDirectory,
+) -> tuple[RunSubject, str, dict[str, object]]:
+    run_metadata = _read_run_json(run, "run.json", "run metadata")
+    if run_metadata.get("adapter_id") != LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID:
+        raise ValueError("optimizer advice requires a completed Evolution run")
+    result = _read_run_json(run, "result.json", "run result")
+    if result.get("adapter_id") != LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID:
+        raise ValueError("optimizer advice requires an Evolution result")
+    run_status = result.get("status")
+    if not isinstance(run_status, str) or run_status not in _EVOLUTION_RUN_STATUSES:
+        raise ValueError("optimizer advice requires a completed Evolution result")
+    binding = _read_run_json(run, "inputs/subject.json", "materialised subject")
+    if set(binding) != {"subject_id", "content_sha256"}:
+        raise ValueError("materialised subject has an invalid binding")
+    subject_id = binding["subject_id"]
+    content_sha256 = binding["content_sha256"]
+    if not isinstance(subject_id, str) or not isinstance(content_sha256, str):
+        raise ValueError("materialised subject has an invalid binding")
+    subject_path = _run_artifact_path(run, "inputs/subject-SKILL.md")
+    return (
+        RunSubject(
+            subject_id=subject_id,
+            content_sha256=content_sha256,
+            content=subject_path.read_bytes(),
+        ),
+        run_status,
+        result,
+    )
+
+
+def _read_run_json(run: RunDirectory, relative_path: str, label: str) -> dict[str, object]:
+    try:
+        value = json.loads(_run_artifact_path(run, relative_path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{label} is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _run_artifact_path(run: RunDirectory, relative_path: str) -> Path:
+    candidate = run.path / relative_path
+    if candidate.is_symlink():
+        raise ValueError(f"{relative_path} must not be a symlink")
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(run.path.resolve())
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{relative_path} must be a local run artifact") from error
+    if not resolved.is_file():
+        raise ValueError(f"{relative_path} must be a file")
+    return resolved
 
 
 def _echo_json(payload: object) -> None:
