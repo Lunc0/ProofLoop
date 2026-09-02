@@ -378,6 +378,38 @@ def test_smoke_gate_requires_v2_evidence_and_at_least_three_passes(
     assert not has_successful_smoke_gate(smoke_suite.custody, invalid_subject)
 
 
+def test_explicit_ungated_evolution_is_limited_to_the_internal_cycle_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.DshRunner", PassingStubDshRunner)
+    subject = _subject("baseline-without-smoke")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+
+    with pytest.raises(RotationRunError, match="successful Smoke gate"):
+        run_rotation_dsh_suite(
+            evolution_suite, dsh_config, None, model, tmp_path / "runs", subject
+        )
+
+    outcome = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        allow_ungated_evolution=True,
+    )
+
+    assert outcome.status == "passed"
+    assert not has_successful_smoke_gate(evolution_suite.custody, subject)
+
+
 def test_enabled_optimizer_runs_after_evolution_failure_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

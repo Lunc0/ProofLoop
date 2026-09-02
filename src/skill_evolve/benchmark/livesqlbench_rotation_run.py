@@ -122,6 +122,7 @@ def run_rotation_dsh_suite(
     optimizer: OptimizerConfig | None = None,
     *,
     optimizer_client: OptimizerClient | None = None,
+    allow_ungated_evolution: bool = False,
 ) -> RotationRunOutcome:
     """Run one frozen rolling manifest without interpreting failures as Skill actions."""
 
@@ -129,7 +130,11 @@ def run_rotation_dsh_suite(
         raise RotationRunError("rolling LiveSQLBench runs require dsh.runner: dsh")
     if subject is None:
         raise RotationRunError("rolling LiveSQLBench runs require a RunSubject")
-    if suite.kind == "evolution" and not has_successful_smoke_gate(suite.custody, subject):
+    if (
+        suite.kind == "evolution"
+        and not allow_ungated_evolution
+        and not has_successful_smoke_gate(suite.custody, subject)
+    ):
         raise RotationRunError("Evolution requires a successful Smoke gate for this RunSubject")
 
     active_optimizer = optimizer if optimizer is not None else OptimizerConfig()
@@ -220,7 +225,7 @@ def run_rotation_dsh_suite(
         optimizer_result,
     )
     passed_case_count = sum(item.passed for item in outcome.evaluations)
-    if suite.kind == "smoke" and _meets_smoke_gate_policy(outcome.status, outcome.evaluations):
+    if suite.kind == "smoke" and meets_smoke_gate_policy(outcome.status, outcome.evaluations):
         _write_smoke_gate(
             suite.custody,
             subject,
@@ -372,7 +377,7 @@ def _status_for(
     return "passed"
 
 
-def _meets_smoke_gate_policy(
+def meets_smoke_gate_policy(
     status: RollingRunStatus, evaluations: tuple[CaseEvaluation, ...]
 ) -> bool:
     if status not in {"passed", "task_failure"} or len(evaluations) != SMOKE_CASE_COUNT:

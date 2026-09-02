@@ -29,6 +29,7 @@ from skill_evolve.benchmark.livesqlbench_rotation import (
     create_rotation_manifest,
     initialise_rotation_reserve,
 )
+from skill_evolve.benchmark.livesqlbench_rotation_run import RotationRunError
 from skill_evolve.candidate import (
     CandidateService,
     CandidateStoreError,
@@ -40,6 +41,7 @@ from skill_evolve.candidate import (
 from skill_evolve.candidate.store import skill_sha256_for_source
 from skill_evolve.config import ManifestError, load_manifest
 from skill_evolve.config.models import OptimizerConfig
+from skill_evolve.evolution import EvolutionCycleError, EvolutionCycleRequest, run_evolution_cycle
 from skill_evolve.fingerprint import create_snapshot
 from skill_evolve.optimizer.edit_plan_service import plan_after_evolution
 from skill_evolve.optimizer.materialization_service import materialize_after_evolution
@@ -54,8 +56,10 @@ benchmark_app = typer.Typer(add_completion=False, no_args_is_help=True)
 livesqlbench_app = typer.Typer(add_completion=False, no_args_is_help=True)
 candidate_app = typer.Typer(add_completion=False, no_args_is_help=True)
 optimizer_app = typer.Typer(add_completion=False, no_args_is_help=True)
+evolution_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(candidate_app, name="candidate")
 app.add_typer(optimizer_app, name="optimizer")
+app.add_typer(evolution_app, name="evolution")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(livesqlbench_app, name="livesqlbench")
 
@@ -63,6 +67,43 @@ _LIVE_SQL_BENCH_ADAPTER_ID = "livesqlbench-base-lite"
 _EVOLUTION_RUN_STATUSES = frozenset(
     {"passed", "task_failure", "runner_invalid", "evaluator_invalid"}
 )
+
+
+@evolution_app.command("cycle")
+def cycle_evolution(
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+    dsh_manifest: Annotated[Path, typer.Argument(dir_okay=False)],
+    candidate_id: Annotated[str, typer.Option("--candidate")],
+    max_generations: Annotated[int, typer.Option("--max-generations")],
+    child_name_prefix: Annotated[str, typer.Option("--child-name-prefix")] = "evolution",
+) -> None:
+    """Run a bounded, explicit Smoke/Evolution/optimizer candidate cycle."""
+
+    try:
+        receipt = run_evolution_cycle(
+            EvolutionCycleRequest(
+                candidate_id=candidate_id,
+                max_generations=max_generations,
+                child_name_prefix=child_name_prefix,
+            ),
+            data_root,
+            dsh_manifest,
+            candidate_service=_candidate_service(),
+            repository_root=Path.cwd(),
+            candidate_store_root=_candidate_root(),
+            runs_root=_runs_root(),
+            cycle_receipts_root=_candidate_root() / "cycles",
+        )
+    except (
+        EvolutionCycleError,
+        ManifestError,
+        RotationError,
+        RotationRunError,
+        OSError,
+        ValueError,
+    ) as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(receipt.public_dict())
 
 
 @app.command()

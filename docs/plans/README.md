@@ -23,3 +23,4 @@
 | 14 | v0.12 | 已完成 | [EditPlan 渲染、机械校验与不可变 Child Skill](14-v0.12-edit-plan-render-child-candidate.md) | [规格](../specs/14-v0.12-edit-plan-render-child-candidate.md) | [实现记录](../design/14-v0.12-edit-plan-render-child-candidate.md) |
 | 15 | v0.13 | 已完成 | [Smoke 固定 Simple/Moderate 配额与 4/5 Gate](15-v0.13-smoke-quota-and-gate.md) | [规格](../specs/15-v0.13-smoke-quota-and-gate.md) | [实现记录](../design/15-v0.13-smoke-quota-and-gate.md) |
 | 16 | v0.14 | 已完成 | [Smoke 3/5 Gate](16-v0.14-smoke-three-of-five-gate.md) | [规格](../specs/16-v0.14-smoke-three-of-five-gate.md) | [实现记录](../design/16-v0.14-smoke-three-of-five-gate.md) |
+| 17 | v0.15 | 已完成 | [受控自动进化循环](17-v0.15-controlled-evolution-cycle.md) | [规格](../specs/17-next-controlled-evolution-cycle.md) | [实现记录](../design/17-v0.15-controlled-evolution-cycle.md) |
