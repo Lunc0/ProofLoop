@@ -107,6 +107,39 @@ agent input，并更新该 run 的 `optimizer/` artifact 与 `result.json` 摘�
 `DEEPSEEK_API_KEY` 或当前工作目录 `.env` 中的同名值。它不执行 DSH、Docker、数据库、evaluator 或 candidate 操作，也不在
 stdout 输出 Skill、evidence 或建议正文。
 
+## 结构化 Skill 修改计划（v0.11）
+
+阶段 13 在 v0.9 advice 之外增加一个显式、非自动的结构化计划命令：
+
+```powershell
+uv run skill-evolve optimizer plan <run-id>
+```
+
+该命令只接受当前工作目录 `runs/` 下已经完成的
+`livesqlbench-base-lite-evolution-v1` run。它验证固化 subject、canonical
+`evolution-coding-agent-input-v3`、Skill SHA-256 和受信任 target contract；不会重跑 DSH、数据库、
+evaluator 或 benchmark。命令本身代表一次真实 optimizer 调用授权，因此仍需要
+`DEEPSEEK_API_KEY`，但不会改变 manifest 或 rotation 的 v0.9 自动 advice 配置。
+
+模型只提出缺陷簇和有限种语义修改。Skill map、block ID、修改权限、target contract、来源 hash、
+cluster/edit ID 和最终计划状态都由本地代码生成或绑定。最多产生三个非重叠 edit；`locked` 区域只能形成
+`findings_only`，`guarded` 区域会得到 `requires_guarded_approval`。该阶段不输出机械 patch，不修改
+`SKILL.md`，也不创建、选择、晋级或回退 candidate。
+
+成功或纯 finding 的产物位于：
+
+```text
+optimizer/edit-plan/
+  skill-map.json
+  edit-plan.json
+  edit-plan.md
+  receipt.json
+```
+
+无效 evidence、模型失败或非法返回只保留该子目录的 terminal `receipt.json`。根 `result.json` 使用独立
+`optimizer_edit_plan` 摘要键记录状态、相对路径、hash 和数量，不覆盖 v0.9 的 `optimizer` advice 摘要；
+stdout 不输出 Skill、任务内容、evidence 或计划正文。
+
 ## 新机器运行
 
 1. 安装 DSH、Docker Desktop、Python 3.11+ 和 `uv`。

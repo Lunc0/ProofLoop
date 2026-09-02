@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -12,7 +11,6 @@ from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.optimizer.client import OptimizerClient
 from skill_evolve.optimizer.contracts import (
     AdviceSource,
-    EvolutionAgentInputManifest,
     ModelAdvice,
     OptimizationAdvice,
     OptimizationResult,
@@ -25,6 +23,7 @@ from skill_evolve.optimizer.deepseek import (
     MissingOptimizerApiKeyError,
     OptimizerRequestError,
 )
+from skill_evolve.optimizer.evidence import load_prepared_evolution_input
 from skill_evolve.registry.store import RunDirectory
 from skill_evolve.subject import RunSubject
 from skill_evolve.trajectory.compressor import canonical_json_bytes
@@ -62,10 +61,10 @@ def advise_after_evolution(
         return _result(run, optimizer, "unavailable")
     if run_status in {"runner_invalid", "evaluator_invalid"}:
         return _result(run, optimizer, "skipped_invalid_evidence")
-    prepared = _load_prepared_input(run, subject, optimizer)
+    prepared = load_prepared_evolution_input(run, subject, optimizer)
     if prepared is None:
         return _result(run, optimizer, "skipped_invalid_evidence")
-    source, payload = prepared
+    source, payload = prepared.source, prepared.payload
     if not payload.trajectories:
         return _result(run, optimizer, "skipped_no_failed_trajectories", source=source)
     active_client = client if client is not None else DeepSeekChatClient()
@@ -112,57 +111,6 @@ def advise_after_evolution(
     )
     run.write_json("optimizer/receipt.json", receipt.model_dump(mode="json"))
     return OptimizationResult(receipt=receipt, advice_path=advice_path)
-
-
-def _load_prepared_input(
-    run: RunDirectory, subject: RunSubject, optimizer: OptimizerConfig
-) -> tuple[AdviceSource, EvolutionAgentInputV3] | None:
-    manifest_path = _artifact_path(run, "agent-input/manifest.json")
-    payload_path = _artifact_path(run, "agent-input/trajectory.json")
-    if manifest_path is None or payload_path is None:
-        return None
-    try:
-        manifest_bytes = manifest_path.read_bytes()
-        if len(manifest_bytes) > 64 * 1024:
-            return None
-        manifest = EvolutionAgentInputManifest.model_validate_json(manifest_bytes)
-        payload_bytes = payload_path.read_bytes()
-        if not payload_bytes or len(payload_bytes) > optimizer.max_input_bytes + 1:
-            return None
-        payload = EvolutionAgentInputV3.model_validate_json(payload_bytes)
-        canonical_payload = canonical_json_bytes(payload.model_dump(mode="json"))
-    except (OSError, UnicodeDecodeError, ValidationError, ValueError):
-        return None
-    if payload_bytes not in {canonical_payload, canonical_payload + b"\n"}:
-        return None
-    if hashlib.sha256(canonical_payload).hexdigest() != manifest.agent_input_sha256:
-        return None
-    if len(canonical_payload) > optimizer.max_input_bytes:
-        return None
-    if payload.evaluated_skill.content_sha256 != subject.content_sha256:
-        return None
-    return (
-        AdviceSource(
-            run_id=run.run_id,
-            agent_input_sha256=manifest.agent_input_sha256,
-            evaluated_skill_sha256=subject.content_sha256,
-        ),
-        payload,
-    )
-
-
-def _artifact_path(run: RunDirectory, relative_path: str) -> Path | None:
-    candidate = run.path / relative_path
-    if candidate.is_symlink():
-        return None
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(run.path.resolve())
-    except (OSError, ValueError):
-        return None
-    if not resolved.is_file():
-        return None
-    return resolved
 
 
 def _user_prompt(payload: EvolutionAgentInputV3) -> str:

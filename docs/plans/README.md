@@ -19,3 +19,4 @@
 | 10 | v0.8.2 | 已完成 | [失败恢复窗口与 Skill 接触证据](10-v0.8.2-failure-recovery-skill-access-evidence.md) | [规格](../specs/10-v0.8.2-failure-recovery-skill-access-evidence.md) | [实现记录](../design/10-v0.8.2-failure-recovery-skill-access-evidence.md) |
 | 11 | v0.9 | 已完成 | [Evolution 后 LLM 优化建议 MVP](11-v0.9-evolution-llm-optimization-advice.md) | [规格](../specs/11-v0.9-evolution-llm-optimization-advice.md) | [实现记录](../design/11-v0.9-evolution-llm-optimization-advice.md) |
 | 12 | v0.10 | 已完成 | [Benchmark DSH 禁用 Web Search 配置 Patch](12-v0.10-dsh-no-web-profile-patch.md) | [规格](../specs/12-v0.10-dsh-no-web-profile-patch.md) | [实现记录](../design/12-v0.10-dsh-no-web-profile-patch.md) |
+| 13 | v0.11 | 已完成 | [结构化 Skill 与行为导向修改计划](13-v0.11-structured-skill-edit-plan.md) | [规格](../specs/13-v0.11-structured-skill-edit-plan.md) | [实现记录](../design/13-v0.11-structured-skill-edit-plan.md) |

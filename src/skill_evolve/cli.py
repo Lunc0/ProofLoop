@@ -41,6 +41,7 @@ from skill_evolve.candidate.store import skill_sha256_for_source
 from skill_evolve.config import ManifestError, load_manifest
 from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.fingerprint import create_snapshot
+from skill_evolve.optimizer.edit_plan_service import plan_after_evolution
 from skill_evolve.optimizer.service import advise_after_evolution
 from skill_evolve.registry import RunDirectory, RunNotFoundError, RunStore
 from skill_evolve.runner.contracts import RunnerOutput
@@ -140,7 +141,7 @@ def advise_optimizer(run_id: str) -> None:
 
     try:
         run = RunStore(_runs_root()).open(run_id)
-        subject, run_status, result = _load_evolution_advice_context(run)
+        subject, run_status, result = _load_evolution_optimizer_context(run, "advice")
         optimizer_result = advise_after_evolution(
             run,
             subject,
@@ -162,6 +163,44 @@ def advise_optimizer(run_id: str) -> None:
         {
             "run_id": run.run_id,
             "optimizer": result["optimizer"],
+        }
+    )
+
+
+@optimizer_app.command("plan")
+def plan_optimizer(run_id: str) -> None:
+    """Generate one semantic edit plan for an existing Evolution run only."""
+
+    try:
+        run = RunStore(_runs_root()).open(run_id)
+        subject, run_status, result = _load_evolution_optimizer_context(run, "plan")
+        plan_result = plan_after_evolution(
+            run,
+            subject,
+            OptimizerConfig(enabled=True),
+            run_status=run_status,
+            adapter_id=LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
+        )
+    except (RunNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        _exit_with_error(str(error), 64)
+    receipt = plan_result.receipt
+    result["optimizer_edit_plan"] = {
+        "status": receipt.status,
+        "plan_path": plan_result.plan_path,
+        "skill_map_path": plan_result.skill_map_path,
+        "provider": receipt.provider,
+        "model": receipt.model,
+        "prompt_version": receipt.prompt_version,
+        "plan_sha256": receipt.plan_sha256,
+        "skill_map_sha256": receipt.skill_map_sha256,
+        "cluster_count": receipt.cluster_count,
+        "edit_count": receipt.edit_count,
+    }
+    run.write_json("result.json", result)
+    _echo_json(
+        {
+            "run_id": run.run_id,
+            "optimizer_edit_plan": result["optimizer_edit_plan"],
         }
     )
 
@@ -401,18 +440,18 @@ def _run_adapter_dsh(
         raise typer.Exit(result.exit_code)
 
 
-def _load_evolution_advice_context(
-    run: RunDirectory,
+def _load_evolution_optimizer_context(
+    run: RunDirectory, operation: str
 ) -> tuple[RunSubject, str, dict[str, object]]:
     run_metadata = _read_run_json(run, "run.json", "run metadata")
     if run_metadata.get("adapter_id") != LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID:
-        raise ValueError("optimizer advice requires a completed Evolution run")
+        raise ValueError(f"optimizer {operation} requires a completed Evolution run")
     result = _read_run_json(run, "result.json", "run result")
     if result.get("adapter_id") != LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID:
-        raise ValueError("optimizer advice requires an Evolution result")
+        raise ValueError(f"optimizer {operation} requires an Evolution result")
     run_status = result.get("status")
     if not isinstance(run_status, str) or run_status not in _EVOLUTION_RUN_STATUSES:
-        raise ValueError("optimizer advice requires a completed Evolution result")
+        raise ValueError(f"optimizer {operation} requires a completed Evolution result")
     binding = _read_run_json(run, "inputs/subject.json", "materialised subject")
     if set(binding) != {"subject_id", "content_sha256"}:
         raise ValueError("materialised subject has an invalid binding")

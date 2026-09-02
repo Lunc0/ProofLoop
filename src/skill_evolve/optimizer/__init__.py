@@ -1,4 +1,4 @@
-"""Bounded, advice-only LLM integration for Evolution evidence."""
+"""Bounded LLM advice and semantic planning for Evolution evidence."""
 
 from skill_evolve.optimizer.client import OptimizerClient, OptimizerClientResponse
 from skill_evolve.optimizer.contracts import (
