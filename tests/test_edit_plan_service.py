@@ -237,7 +237,7 @@ def test_valid_plan_writes_bound_artifacts_without_raw_case_ids(tmp_path: Path) 
     assert receipt["plan_sha256"] == hashlib.sha256(plan_bytes).hexdigest()
 
 
-def test_guarded_target_requires_approval_but_locked_target_is_rejected(
+def test_guarded_target_is_proposed_but_locked_target_is_rejected(
     tmp_path: Path,
 ) -> None:
     run = RunStore(tmp_path / "runs").create()
@@ -252,7 +252,7 @@ def test_guarded_target_requires_approval_but_locked_target_is_rejected(
         adapter_id=LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
         client=DynamicPlanClient(target_permission="guarded"),
     )
-    assert guarded.receipt.status == "requires_guarded_approval"
+    assert guarded.receipt.status == "proposed"
     assert guarded.plan_path is not None
 
     locked = plan_after_evolution(

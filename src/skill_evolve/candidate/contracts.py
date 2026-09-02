@@ -39,6 +39,7 @@ class CandidateStatus(StrEnum):
 class CandidateOrigin(StrEnum):
     MANUAL = "manual"
     EXTERNAL_AGENT = "external_agent"
+    OPTIMIZER = "optimizer"
 
 
 class ExternalSource(StrictCandidateModel):
@@ -87,6 +88,28 @@ class ExternalSource(StrictCandidateModel):
         return value
 
 
+class OptimizerProvenance(StrictCandidateModel):
+    """Non-secret lineage for a child rendered from one semantic edit plan."""
+
+    edit_plan_sha256: str
+    patch_sha256: str
+    parent_skill_sha256: str
+    render_policy_version: str
+
+    @field_validator("edit_plan_sha256", "patch_sha256", "parent_skill_sha256")
+    @classmethod
+    def validate_hashes(cls, value: str) -> str:
+        _validate_sha256(value, "optimizer provenance hash")
+        return value
+
+    @field_validator("render_policy_version")
+    @classmethod
+    def validate_render_policy(cls, value: str) -> str:
+        if value != "skill-edit-render-policy-v1":
+            raise ValueError("unsupported optimizer render policy")
+        return value
+
+
 class CandidateMetadata(StrictCandidateModel):
     """Immutable metadata written beside one candidate's ``SKILL.md``."""
 
@@ -100,6 +123,7 @@ class CandidateMetadata(StrictCandidateModel):
     origin: CandidateOrigin
     status: CandidateStatus = CandidateStatus.DRAFT
     external_source: ExternalSource | None = None
+    optimizer_provenance: OptimizerProvenance | None = None
 
     @field_validator("schema_version")
     @classmethod
@@ -154,6 +178,16 @@ class CandidateMetadata(StrictCandidateModel):
             and self.external_source.file_sha256 != self.skill_sha256
         ):
             raise ValueError("external_source.file_sha256 must match skill_sha256")
+        if self.origin is CandidateOrigin.OPTIMIZER:
+            if (
+                self.optimizer_provenance is None
+                or self.parent_candidate_id is None
+                or self.source_run_id is None
+                or self.external_source is not None
+            ):
+                raise ValueError("optimizer candidates require local optimizer provenance")
+        elif self.optimizer_provenance is not None:
+            raise ValueError("optimizer provenance requires optimizer origin")
         return self
 
 

@@ -8,6 +8,7 @@ from skill_evolve.optimizer.contracts import (
     OptimizerStatus,
 )
 from skill_evolve.optimizer.deepseek import DeepSeekChatClient
+from skill_evolve.optimizer.materialization_service import materialize_after_evolution
 from skill_evolve.optimizer.service import advise_after_evolution
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "OptimizerReceipt",
     "OptimizerStatus",
     "advise_after_evolution",
+    "materialize_after_evolution",
 ]

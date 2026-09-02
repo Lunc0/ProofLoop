@@ -42,6 +42,7 @@ from skill_evolve.config import ManifestError, load_manifest
 from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.fingerprint import create_snapshot
 from skill_evolve.optimizer.edit_plan_service import plan_after_evolution
+from skill_evolve.optimizer.materialization_service import materialize_after_evolution
 from skill_evolve.optimizer.service import advise_after_evolution
 from skill_evolve.registry import RunDirectory, RunNotFoundError, RunStore
 from skill_evolve.runner.contracts import RunnerOutput
@@ -201,6 +202,43 @@ def plan_optimizer(run_id: str) -> None:
         {
             "run_id": run.run_id,
             "optimizer_edit_plan": result["optimizer_edit_plan"],
+        }
+    )
+
+
+@optimizer_app.command("materialize")
+def materialize_optimizer(
+    run_id: str,
+    candidate_name: Annotated[str, typer.Option("--candidate-name")],
+) -> None:
+    """Render one existing EditPlan into an immutable draft child candidate."""
+
+    try:
+        run = RunStore(_runs_root()).open(run_id)
+        subject, _, result = _load_evolution_optimizer_context(run, "materialize")
+        materialization = materialize_after_evolution(
+            run,
+            subject,
+            _candidate_service(),
+            candidate_name,
+        )
+    except (RunNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        _exit_with_error(str(error), 64)
+    receipt = materialization.receipt
+    result["optimizer_materialization"] = {
+        "status": receipt.status,
+        "patch_path": materialization.patch_path,
+        "parent_candidate_id": receipt.source.parent_candidate_id if receipt.source else None,
+        "child_candidate_id": receipt.child_candidate_id,
+        "child_skill_sha256": receipt.child_skill_sha256,
+        "patch_sha256": receipt.patch_sha256,
+        "edit_count": receipt.edit_count,
+    }
+    run.write_json("result.json", result)
+    _echo_json(
+        {
+            "run_id": run.run_id,
+            "optimizer_materialization": result["optimizer_materialization"],
         }
     )
 

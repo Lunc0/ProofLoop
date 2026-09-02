@@ -123,7 +123,8 @@ evaluator 或 benchmark。命令本身代表一次真实 optimizer 调用授权�
 
 模型只提出缺陷簇和有限种语义修改。Skill map、block ID、修改权限、target contract、来源 hash、
 cluster/edit ID 和最终计划状态都由本地代码生成或绑定。最多产生三个非重叠 edit；`locked` 区域只能形成
-`findings_only`，`guarded` 区域会得到 `requires_guarded_approval`。该阶段不输出机械 patch，不修改
+`findings_only`，v0.11 对 `guarded` 区域会记录历史兼容状态 `requires_guarded_approval`。阶段 14 不再把该状态
+解释为人工审批门槛，而是以 target binding 与 diff 机械校验决定能否渲染。该阶段不输出机械 patch，不修改
 `SKILL.md`，也不创建、选择、晋级或回退 candidate。
 
 成功或纯 finding 的产物位于：
@@ -139,6 +140,22 @@ optimizer/edit-plan/
 无效 evidence、模型失败或非法返回只保留该子目录的 terminal `receipt.json`。根 `result.json` 使用独立
 `optimizer_edit_plan` 摘要键记录状态、相对路径、hash 和数量，不覆盖 v0.9 的 `optimizer` advice 摘要；
 stdout 不输出 Skill、任务内容、evidence 或计划正文。
+
+## EditPlan 渲染与 Child Skill（v0.12）
+
+对已有的、完成的 Evolution run，可显式将其 EditPlan 渲染为不可变 draft child：
+
+```powershell
+uv run skill-evolve optimizer materialize <run-id> --candidate-name <child-name>
+```
+
+命令不调用模型、不运行 DSH、数据库或 benchmark。它验证 parent candidate 与 run subject 的绑定，渲染
+`SKILL.md` patch，并在本地 candidate store 原子创建 child。`guarded` 区块不再需要人工审批；历史
+`requires_guarded_approval` artifact 在读取时等价处理为 `proposed`，`locked` 区块始终拒绝。
+
+成功的 run artifact 位于 `optimizer/materialization/`，包含 `rendered.patch` 和 `receipt.json`；根
+`result.json` 的 `optimizer_materialization` 及 stdout 只输出安全摘要。新 child 保持 `draft`，不会自动评测、选择、
+晋级或回退。
 
 ## 新机器运行
 

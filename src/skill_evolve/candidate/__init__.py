@@ -6,6 +6,7 @@ from skill_evolve.candidate.contracts import (
     CandidateStatus,
     CatalogEntry,
     ExternalSource,
+    OptimizerProvenance,
     ResolvedCandidate,
 )
 from skill_evolve.candidate.service import CandidateService
@@ -21,6 +22,7 @@ __all__ = [
     "CatalogEntry",
     "ExternalSource",
     "LocalCandidateStore",
+    "OptimizerProvenance",
     "ResolvedCandidate",
     "subject_from_candidate",
 ]

@@ -335,7 +335,6 @@ def _bind_plan(
 
     touched_blocks: set[str] = set()
     bound_edits: list[SemanticEdit] = []
-    requires_guarded_approval = False
     for edit_index, model_edit in enumerate(model_plan.edits, start=1):
         _validate_operation(model_edit, model_plan)
         target_ids = set(model_edit.target_block_ids)
@@ -353,8 +352,6 @@ def _bind_plan(
         permissions = {blocks[block_id].permission for block_id in target_ids}
         if "locked" in permissions:
             raise ValueError("locked Skill blocks cannot be edited")
-        if "guarded" in permissions:
-            requires_guarded_approval = True
         layers = {blocks[block_id].layer for block_id in target_ids}
         cluster_ids = tuple(f"cluster-{index:03d}" for index in model_edit.cluster_indices)
         bound_edits.append(
@@ -381,13 +378,9 @@ def _bind_plan(
         DefectCluster(cluster_id=f"cluster-{index:03d}", **cluster.model_dump())
         for index, cluster in enumerate(model_plan.clusters, start=1)
     )
-    status: Literal["proposed", "requires_guarded_approval", "findings_only"]
-    if not bound_edits:
-        status = "findings_only"
-    elif requires_guarded_approval:
-        status = "requires_guarded_approval"
-    else:
-        status = "proposed"
+    status: Literal["proposed", "findings_only"] = (
+        "findings_only" if not bound_edits else "proposed"
+    )
     return SkillEditPlan(
         status=status,
         source=source,

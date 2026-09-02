@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 from skill_evolve.candidate import (
+    CandidateOrigin,
     CandidateService,
     CandidateStoreError,
     ExternalSource,
     LocalCandidateStore,
+    OptimizerProvenance,
 )
 from skill_evolve.candidate.store import skill_sha256_for_source
 
@@ -108,6 +110,30 @@ def test_store_rejects_candidate_attachments(tmp_path: Path) -> None:
 
     with pytest.raises(CandidateStoreError, match="may contain only"):
         service.verify(candidate.candidate_id)
+
+
+def test_store_persists_optimizer_provenance_for_a_draft_child(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    baseline = service.initialise("sql-analyst", _write_skill(tmp_path / "sources" / "base.md"))
+    provenance = OptimizerProvenance(
+        edit_plan_sha256="a" * 64,
+        patch_sha256="b" * 64,
+        parent_skill_sha256=baseline.metadata.skill_sha256,
+        render_policy_version="skill-edit-render-policy-v1",
+    )
+    child = service.import_candidate(
+        "sql-analyst",
+        "001-materialized",
+        _write_skill(tmp_path / "sources" / "child.md", "# Child\n"),
+        parent_candidate_id=baseline.candidate_id,
+        source_run_id="20260902T000000Z-12345678",
+        origin=CandidateOrigin.OPTIMIZER,
+        optimizer_provenance=provenance,
+    )
+
+    assert child.metadata.origin is CandidateOrigin.OPTIMIZER
+    assert child.metadata.optimizer_provenance == provenance
+    assert service.verify(child.candidate_id).metadata.status.value == "draft"
 
 
 def test_store_rejects_catalog_lineage_cycle_and_does_not_use_paths_from_metadata(

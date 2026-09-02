@@ -62,7 +62,6 @@ SemanticOperation = Literal[
 ValidationMode = Literal["automatic", "review_only"]
 EditPlanStatus = Literal[
     "proposed",
-    "requires_guarded_approval",
     "findings_only",
     "skipped_no_failed_trajectories",
     "skipped_invalid_evidence",
@@ -71,6 +70,7 @@ EditPlanStatus = Literal[
     "unavailable",
 ]
 EditPlanErrorCode = Literal["missing_api_key", "request_failed", "invalid_response"]
+_LEGACY_GUARDED_APPROVAL_STATUS = "requires_guarded_approval"
 
 
 class StrictEditPlanModel(BaseModel):
@@ -93,6 +93,16 @@ def _validate_text(value: str) -> str:
     if value.lstrip().lower().startswith(("# skill", "---\nname:")):
         raise ValueError("semantic edit text must not contain a full Skill document")
     return value
+
+
+def normalise_historical_edit_plan_status(value: object) -> Literal["proposed", "findings_only"]:
+    """Read the one retired v0.11 status without allowing new code to write it."""
+
+    if value in {"proposed", _LEGACY_GUARDED_APPROVAL_STATUS}:
+        return "proposed"
+    if value == "findings_only":
+        return "findings_only"
+    raise ValueError("edit plan status is not materializable")
 
 
 class SkillBlock(StrictEditPlanModel):
@@ -546,7 +556,7 @@ class SemanticEdit(StrictEditPlanModel):
 
 class SkillEditPlan(StrictEditPlanModel):
     schema_version: Literal["skill-edit-plan-v1"] = "skill-edit-plan-v1"
-    status: Literal["proposed", "requires_guarded_approval", "findings_only"]
+    status: Literal["proposed", "findings_only"]
     source: EditPlanSource
     summary: str = Field(min_length=1, max_length=2048)
     clusters: tuple[DefectCluster, ...] = Field(min_length=1, max_length=8)
@@ -597,7 +607,6 @@ class EditPlanReceipt(StrictEditPlanModel):
     def validate_terminal_state(self) -> EditPlanReceipt:
         successful = self.status in {
             "proposed",
-            "requires_guarded_approval",
             "findings_only",
         }
         if successful and (
@@ -608,7 +617,7 @@ class EditPlanReceipt(StrictEditPlanModel):
             or self.error_code is not None
         ):
             raise ValueError("successful receipt requires complete source and artifact bindings")
-        if self.status in {"proposed", "requires_guarded_approval"} and self.edit_count < 1:
+        if self.status == "proposed" and self.edit_count < 1:
             raise ValueError("an actionable receipt requires at least one edit")
         if self.status == "findings_only" and self.edit_count != 0:
             raise ValueError("findings_only receipt must not claim an edit")

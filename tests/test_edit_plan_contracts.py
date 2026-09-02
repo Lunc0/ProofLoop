@@ -11,6 +11,7 @@ from skill_evolve.optimizer.edit_plan_contracts import (
     ModelEditPlan,
     ModelSemanticEdit,
     WorkflowRule,
+    normalise_historical_edit_plan_status,
 )
 
 _CASE_REF = "case-001-0123456789ab"
@@ -53,6 +54,13 @@ def test_semantic_text_rejects_patch_and_full_skill() -> None:
         _edit(1, intent="*** Begin Patch\nreplace everything")
     with pytest.raises(ValidationError, match="full Skill"):
         _edit(1, intent="# SKILL.md\nRewrite everything")
+
+
+def test_historical_guarded_status_normalises_but_unknown_status_is_rejected() -> None:
+    assert normalise_historical_edit_plan_status("requires_guarded_approval") == "proposed"
+    assert normalise_historical_edit_plan_status("findings_only") == "findings_only"
+    with pytest.raises(ValueError, match="not materializable"):
+        normalise_historical_edit_plan_status("unknown")
 
 
 def _cluster(
