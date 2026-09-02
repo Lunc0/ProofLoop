@@ -49,7 +49,9 @@ LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID: Literal[
     "livesqlbench-base-lite-evolution-v1"
 ] = "livesqlbench-base-lite-evolution-v1"
 ROTATION_ROOT_ENVIRONMENT_VARIABLE = "SKILL_EVOLVE_ROTATION_ROOT"
-ROTATION_MANIFEST_SCHEMA_VERSION: Literal["v1"] = "v1"
+RotationManifestSchemaVersion: TypeAlias = Literal["v1", "v2"]
+CURRENT_SMOKE_MANIFEST_SCHEMA_VERSION: Literal["v2"] = "v2"
+_ROTATION_RESERVE_SCHEMA_VERSION: Literal["v1"] = "v1"
 ROTATION_RESERVE_FILENAME = "livesqlbench-base-lite-rotation-reserve-v1.json"
 ROTATION_TIERS: tuple[RotationTier, ...] = ("Simple", "Moderate", "Challenging")
 SMOKE_CASE_COUNT = 5
@@ -60,11 +62,12 @@ _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _MANIFEST_ID_PATTERN = re.compile(r"^(?:smoke|evolution)-[0-9a-f]{24}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_MANIFEST_BYTES = 128 * 1024
-_SMOKE_QUOTAS: tuple[dict[RotationTier, int], ...] = (
+_LEGACY_SMOKE_QUOTAS: tuple[dict[RotationTier, int], ...] = (
     {"Simple": 2, "Moderate": 2, "Challenging": 1},
     {"Simple": 2, "Moderate": 1, "Challenging": 2},
     {"Simple": 1, "Moderate": 2, "Challenging": 2},
 )
+_SMOKE_QUOTA: dict[RotationTier, int] = {"Simple": 3, "Moderate": 2, "Challenging": 0}
 _RotationRecord = TypeVar("_RotationRecord", bound="StrictRotationModel")
 
 
@@ -114,7 +117,8 @@ class RotationReserve(StrictRotationModel):
     @model_validator(mode="after")
     def validate_selection(self) -> RotationReserve:
         _validate_unique_case_ids(self.cases)
-        counts = Counter(case.difficulty_tier for case in self.cases)
+        case_counts = Counter(case.difficulty_tier for case in self.cases)
+        counts = {tier: case_counts[tier] for tier in ROTATION_TIERS}
         if any(counts[tier] != RESERVE_CASES_PER_TIER for tier in ROTATION_TIERS):
             raise ValueError("must contain five cases in every tier")
         return self
@@ -123,7 +127,7 @@ class RotationReserve(StrictRotationModel):
 class RotationManifest(StrictRotationModel):
     """Private immutable selection for one authorised rolling execution."""
 
-    schema_version: Literal["v1"]
+    schema_version: RotationManifestSchemaVersion
     adapter_id: Literal[
         "livesqlbench-base-lite-smoke-rotation-v1",
         "livesqlbench-base-lite-evolution-v1",
@@ -162,8 +166,9 @@ class RotationManifest(StrictRotationModel):
     @model_validator(mode="after")
     def validate_selection(self) -> RotationManifest:
         _validate_unique_case_ids(self.cases)
-        expected = quota_for_adapter(self.adapter_id, self.selection_index)
-        counts = Counter(case.difficulty_tier for case in self.cases)
+        expected = quota_for_adapter(self.adapter_id, self.selection_index, self.schema_version)
+        case_counts = Counter(case.difficulty_tier for case in self.cases)
+        counts = {tier: case_counts[tier] for tier in ROTATION_TIERS}
         if counts != expected:
             raise ValueError("does not match the required tier quota")
         return self
@@ -290,12 +295,18 @@ def kind_for_adapter(adapter_id: str) -> RotationKind:
     raise RotationError("rotation adapter ID is invalid")
 
 
-def quota_for_adapter(adapter_id: str, selection_index: int) -> dict[RotationTier, int]:
+def quota_for_adapter(
+    adapter_id: str,
+    selection_index: int,
+    schema_version: RotationManifestSchemaVersion = CURRENT_SMOKE_MANIFEST_SCHEMA_VERSION,
+) -> dict[RotationTier, int]:
     kind = kind_for_adapter(adapter_id)
     if selection_index < 0:
         raise RotationError("rotation selection index is invalid")
     if kind == "smoke":
-        return dict(_SMOKE_QUOTAS[selection_index % len(_SMOKE_QUOTAS)])
+        if schema_version == "v1":
+            return dict(_LEGACY_SMOKE_QUOTAS[selection_index % len(_LEGACY_SMOKE_QUOTAS)])
+        return dict(_SMOKE_QUOTA)
     return {tier: RESERVE_CASES_PER_TIER for tier in ROTATION_TIERS}
 
 
@@ -350,7 +361,7 @@ def initialise_rotation_reserve(
         final_case_ids = {case.instance_id for case in final_manifest.cases}
         selected = _select_records(records, final_case_ids, _reserve_quota())
         draft = RotationReserve(
-            schema_version=ROTATION_MANIFEST_SCHEMA_VERSION,
+            schema_version=_ROTATION_RESERVE_SCHEMA_VERSION,
             public_data_sha256=public_digest,
             final_manifest_sha256=final_manifest.manifest_sha256,
             cases=tuple(_manifest_case(record) for record in selected),
@@ -390,13 +401,16 @@ def create_rotation_manifest(
             raise RotationError("rotation public data integrity check failed")
         selection_index = _next_selection_index(custody, kind)
         adapter_id = adapter_for_kind(kind)
-        quota = quota_for_adapter(adapter_id, selection_index)
+        manifest_schema_version: RotationManifestSchemaVersion = (
+            CURRENT_SMOKE_MANIFEST_SCHEMA_VERSION if kind == "smoke" else "v1"
+        )
+        quota = quota_for_adapter(adapter_id, selection_index, manifest_schema_version)
         excluded = {case.instance_id for case in final_manifest.cases}
         excluded.update(case.instance_id for case in reserve.cases)
         selected = _select_records(records, excluded, quota)
         manifest_id = f"{kind}-{secrets.token_hex(12)}"
         draft = RotationManifest(
-            schema_version=ROTATION_MANIFEST_SCHEMA_VERSION,
+            schema_version=manifest_schema_version,
             adapter_id=adapter_id,
             manifest_id=manifest_id,
             selection_index=selection_index,
@@ -470,6 +484,8 @@ def load_rotation_suite(
         reserve = load_rotation_reserve(custody)
         final_manifest = _load_final_manifest(repository_root, candidate_store_root)
         manifest = load_rotation_manifest(custody, manifest_id)
+        if kind_for_adapter(manifest.adapter_id) == "smoke" and manifest.schema_version != "v2":
+            raise RotationError("legacy Smoke manifests are retired")
         if (
             manifest.final_manifest_sha256 != final_manifest.manifest_sha256
             or manifest.reserve_sha256 != reserve.reserve_sha256

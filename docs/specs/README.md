@@ -21,3 +21,5 @@
 | 12 | v0.10 | 已完成 | [Benchmark DSH 禁用 Web Search 配置 Patch](12-v0.10-dsh-no-web-profile-patch.md) | [实施计划](../plans/12-v0.10-dsh-no-web-profile-patch.md) | [实现记录](../design/12-v0.10-dsh-no-web-profile-patch.md) |
 | 13 | v0.11 | 已完成 | [结构化 Skill 与行为导向修改计划](13-v0.11-structured-skill-edit-plan.md) | [实施计划](../plans/13-v0.11-structured-skill-edit-plan.md) | [实现记录](../design/13-v0.11-structured-skill-edit-plan.md) |
 | 14 | v0.12 | 已完成 | [EditPlan 渲染、机械校验与不可变 Child Skill](14-v0.12-edit-plan-render-child-candidate.md) | [实施计划](../plans/14-v0.12-edit-plan-render-child-candidate.md) | [实现记录](../design/14-v0.12-edit-plan-render-child-candidate.md) |
+| 15 | v0.13 | 已完成 | [Smoke 固定 Simple/Moderate 配额与 4/5 Gate](15-v0.13-smoke-quota-and-gate.md) | [实施计划](../plans/15-v0.13-smoke-quota-and-gate.md) | [实现记录](../design/15-v0.13-smoke-quota-and-gate.md) |
+| 16 | v0.14 | 已完成 | [Smoke 3/5 Gate](16-v0.14-smoke-three-of-five-gate.md) | [实施计划](../plans/16-v0.14-smoke-three-of-five-gate.md) | [实现记录](../design/16-v0.14-smoke-three-of-five-gate.md) |

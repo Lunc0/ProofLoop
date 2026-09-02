@@ -58,9 +58,9 @@ candidate，再把其 `SKILL.md` 转换为通用 `RunSubject` 交给 runner。�
 
 ## 3. 滚动 Smoke 与 Evolution
 
-滚动评测从同一个开发题池抽题：Smoke 的每份 manifest 有 5 题，Evolution 的每份有 15 题。它们可以选到
-同一道题；Final 永远不会进入滚动题池。reserve、manifest 和 Smoke gate receipt 都位于仓库外的
-`rotation` custody。
+滚动评测从同一个开发题池抽题：新建 Smoke manifest 固定为 Simple 3、Moderate 2、Challenging 0，共 5 题；
+Evolution 仍为每个 tier 5 题、共 15 题。它们可以选到同一道题；Final 永远不会进入滚动题池。reserve、manifest
+和 Smoke gate receipt 都位于仓库外的 `rotation` custody。
 
 滚动 run 必须提供稳定的 `RunSubject`，当前 CLI 通过 `--candidate <candidate-id>` 提供它。因此固定五题和
 Final 可以运行无 Skill baseline，而 Smoke/Evolution **必须**带 `--candidate`；省略该选项会在启动 fixture、
@@ -95,8 +95,10 @@ uv run skill-evolve benchmark run `
   --manifest <smoke-manifest-id> --candidate <candidate-id>
 ```
 
-只有全部 5/5 `passed` 的 Smoke 才会为相同的被测对象写入 gate receipt。任何 `task_failure`、
-`runner_invalid` 或 `evaluator_invalid` 都不会放行 Evolution；后两者属于基础设施问题，而不是 Skill 结论。
+完整执行五题后，若至少 3/5 `passed` 且没有 `runner_invalid` 或 `evaluator_invalid`，Smoke 会为相同的被测对象
+写入 v2 gate receipt。3/5 或 4/5 的 run status 仍会如实记为 `task_failure`，但 receipt 会记录实际通过数与门槛；2/5
+及以下、`runner_invalid` 或 `evaluator_invalid` 都不会放行 Evolution。历史 `2/2/1` Smoke manifest 与 v1 gate
+receipt 只保留审计用途，不能再运行或放行 Evolution。
 
 ### 创建并运行 Evolution
 
@@ -174,7 +176,7 @@ Final 的 run evidence 位于 `D:\skill-evolve-evaluator\heldout\runs\`，完整
 | --- | --- | --- | --- |
 | 固定五题 | `livesqlbench-base-lite` | 无 | 可选 |
 | 滚动 Smoke | `livesqlbench-base-lite-smoke-rotation-v1` | `SKILL_EVOLVE_ROTATION_ROOT`、`--manifest` 与 `--candidate` | 必须 |
-| 滚动 Evolution | `livesqlbench-base-lite-evolution-v1` | Smoke 5/5 gate、`SKILL_EVOLVE_ROTATION_ROOT`、`--manifest` 与 `--candidate` | 必须 |
+| 滚动 Evolution | `livesqlbench-base-lite-evolution-v1` | 当前 v2 Smoke 3/5 gate、`SKILL_EVOLVE_ROTATION_ROOT`、`--manifest` 与 `--candidate` | 必须 |
 | Final 三十题 | `livesqlbench-base-lite-query-final-v1` | 先执行 `enter-heldout.ps1` | 可选 |
 
 关于 Final custody 创建、DSH provider route 和独立复现实例，另见

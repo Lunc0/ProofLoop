@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
 from skill_evolve.benchmark.livesqlbench import (
     LiveSQLBenchCase,
@@ -20,6 +20,7 @@ from skill_evolve.benchmark.livesqlbench import (
 )
 from skill_evolve.benchmark.livesqlbench_rotation import (
     ROTATION_TIERS,
+    SMOKE_CASE_COUNT,
     RotationCustody,
     RotationLiveSQLBenchSuite,
     StrictRotationModel,
@@ -54,20 +55,45 @@ from skill_evolve.trajectory.compressor import (
 from skill_evolve.trajectory.contracts import CompressedTrajectory
 
 RollingRunStatus = Literal["passed", "task_failure", "runner_invalid", "evaluator_invalid"]
+SMOKE_MINIMUM_PASSED_CASES: Literal[3] = 3
 
 
 class RotationRunError(RuntimeError):
     """A rolling run cannot safely start or satisfy the Smoke gate."""
 
 
-class SmokeGateReceipt(StrictRotationModel):
-    """Private proof that one immutable subject passed one Smoke manifest."""
+class LegacySmokeGateReceipt(StrictRotationModel):
+    """Historical v1 Smoke proof retained for custody-only audit reads."""
 
     schema_version: Literal["v1"]
     subject: dict[str, str]
     smoke_manifest_sha256: str
     smoke_environment_fingerprint: str
     gate_sha256: str
+
+
+class SmokeGateReceipt(StrictRotationModel):
+    """Private v2 proof that one immutable subject met the current Smoke gate."""
+
+    schema_version: Literal["v2"]
+    subject: dict[str, str]
+    smoke_manifest_sha256: str
+    smoke_environment_fingerprint: str
+    passed_case_count: int
+    case_count: Literal[5]
+    minimum_passed_case_count: Literal[3, 4]
+    gate_sha256: str
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> SmokeGateReceipt:
+        if not SMOKE_MINIMUM_PASSED_CASES <= self.passed_case_count <= self.case_count:
+            raise ValueError("Smoke gate pass count does not meet the current policy")
+        if self.passed_case_count < self.minimum_passed_case_count:
+            raise ValueError("Smoke gate pass count does not meet the current policy")
+        return self
+
+
+SmokeGate = LegacySmokeGateReceipt | SmokeGateReceipt
 
 
 @dataclass(frozen=True)
@@ -193,12 +219,14 @@ def run_rotation_dsh_suite(
         subject,
         optimizer_result,
     )
-    if suite.kind == "smoke" and status == "passed":
+    passed_case_count = sum(item.passed for item in outcome.evaluations)
+    if suite.kind == "smoke" and _meets_smoke_gate_policy(outcome.status, outcome.evaluations):
         _write_smoke_gate(
             suite.custody,
             subject,
             suite.manifest.manifest_sha256,
             environment_fingerprint,
+            passed_case_count,
         )
     return outcome
 
@@ -299,7 +327,7 @@ def _write_evolution_agent_input(
 
 
 def has_successful_smoke_gate(custody: RotationCustody, subject: RunSubject) -> bool:
-    """Return whether custody contains a verified 5/5 Smoke receipt for the subject."""
+    """Return whether custody contains a verified v2 3/5 Smoke receipt for the subject."""
 
     root = custody.gate_root
     if not root.exists():
@@ -310,7 +338,7 @@ def has_successful_smoke_gate(custody: RotationCustody, subject: RunSubject) -> 
         if path.is_symlink() or not path.is_file() or path.suffix != ".json":
             raise RotationRunError("Smoke gate custody is invalid")
         receipt = _load_gate(path)
-        if receipt.subject == subject.public_binding():
+        if isinstance(receipt, SmokeGateReceipt) and receipt.subject == subject.public_binding():
             return True
     return False
 
@@ -342,6 +370,15 @@ def _status_for(
     if any(not evaluation.passed for evaluation in evaluations):
         return "task_failure"
     return "passed"
+
+
+def _meets_smoke_gate_policy(
+    status: RollingRunStatus, evaluations: tuple[CaseEvaluation, ...]
+) -> bool:
+    if status not in {"passed", "task_failure"} or len(evaluations) != SMOKE_CASE_COUNT:
+        return False
+    passed_case_count = sum(item.passed for item in evaluations)
+    return SMOKE_MINIMUM_PASSED_CASES <= passed_case_count <= SMOKE_CASE_COUNT
 
 
 def _write_initial_evidence(
@@ -452,7 +489,7 @@ def _tier_metrics(
             "passed_count": sum(item.passed for item in grouped[tier]),
             "pass_rate": (
                 sum(item.passed for item in grouped[tier]) / expected[tier]
-                if len(grouped[tier]) == expected[tier]
+                if expected[tier] > 0 and len(grouped[tier]) == expected[tier]
                 else None
             ),
         }
@@ -539,6 +576,7 @@ def _write_smoke_gate(
     subject: RunSubject,
     smoke_manifest_sha256: str,
     environment_fingerprint: str,
+    passed_case_count: int,
 ) -> None:
     try:
         custody.gate_root.mkdir(exist_ok=True)
@@ -547,10 +585,13 @@ def _write_smoke_gate(
         subject_key = _hash_json(subject.public_binding())
         path = custody.gate_root / f"{subject_key}-{smoke_manifest_sha256[:16]}.json"
         draft = SmokeGateReceipt(
-            schema_version="v1",
+            schema_version="v2",
             subject=subject.public_binding(),
             smoke_manifest_sha256=smoke_manifest_sha256,
             smoke_environment_fingerprint=environment_fingerprint,
+            passed_case_count=passed_case_count,
+            case_count=5,
+            minimum_passed_case_count=SMOKE_MINIMUM_PASSED_CASES,
             gate_sha256="0" * 64,
         )
         receipt = draft.model_copy(update={"gate_sha256": _gate_digest(draft)})
@@ -561,12 +602,22 @@ def _write_smoke_gate(
         raise RotationRunError("Smoke gate could not be persisted") from None
 
 
-def _load_gate(path: Path) -> SmokeGateReceipt:
+def _load_gate(path: Path) -> SmokeGate:
     try:
         payload = path.read_bytes()
         if not payload or len(payload) > 32 * 1024 or b"\x00" in payload:
             raise RotationRunError("Smoke gate custody is invalid")
-        receipt = SmokeGateReceipt.model_validate_json(payload)
+        document = json.loads(payload)
+        if not isinstance(document, dict):
+            raise RotationRunError("Smoke gate custody is invalid")
+        schema_version = document.get("schema_version")
+        receipt: SmokeGate
+        if schema_version == "v1":
+            receipt = LegacySmokeGateReceipt.model_validate(document)
+        elif schema_version == "v2":
+            receipt = SmokeGateReceipt.model_validate(document)
+        else:
+            raise RotationRunError("Smoke gate custody is invalid")
         if receipt.gate_sha256 != _gate_digest(receipt):
             raise RotationRunError("Smoke gate custody is invalid")
     except RotationRunError:
@@ -576,11 +627,11 @@ def _load_gate(path: Path) -> SmokeGateReceipt:
     return receipt
 
 
-def _gate_digest(receipt: SmokeGateReceipt) -> str:
+def _gate_digest(receipt: SmokeGate) -> str:
     return _hash_json(receipt.model_dump(mode="json", exclude={"gate_sha256"}))
 
 
-def _gate_bytes(receipt: SmokeGateReceipt) -> bytes:
+def _gate_bytes(receipt: SmokeGate) -> bytes:
     return (json.dumps(receipt.model_dump(mode="json"), sort_keys=True, indent=2) + "\n").encode()
 
 
