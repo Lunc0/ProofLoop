@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from skill_evolve.benchmark import livesqlbench_rotation_run as rotation_run
 from skill_evolve.benchmark.livesqlbench_heldout import (
     HELDOUT_ROOT_ENVIRONMENT_VARIABLE,
     initialise_heldout_manifest,
@@ -26,6 +27,7 @@ from skill_evolve.benchmark.livesqlbench_rotation_run import (
     run_rotation_dsh_suite,
 )
 from skill_evolve.config.models import DshConfig, ModelConfig, OptimizerConfig
+from skill_evolve.evaluator.core import CaseEvaluation, Verdict
 from skill_evolve.optimizer.client import OptimizerClientResponse
 from skill_evolve.runner.contracts import (
     AgentExecution,
@@ -61,6 +63,27 @@ class StubFixture:
         return StubExecutor()
 
 
+class SelectivePreflightExecutor:
+    def __init__(self, fixture: type[SelectivePreflightFixture]) -> None:
+        self._fixture = fixture
+
+    def execute_read_only(self, query: str) -> QueryExecution:
+        del query
+        self._fixture.call_count += 1
+        if self._fixture.call_count <= self._fixture.failing_case_count:
+            return QueryExecution(error="trusted fixture test failure")
+        return QueryExecution(result=QueryResult(columns=("value",), rows=((1,),)))
+
+
+class SelectivePreflightFixture(StubFixture):
+    failing_case_count = 0
+    call_count = 0
+
+    def for_database(self, database_name: str) -> SelectivePreflightExecutor:
+        assert database_name.startswith("db")
+        return SelectivePreflightExecutor(type(self))
+
+
 class StubQueryService:
     def __init__(self, executor: StubExecutor) -> None:
         del executor
@@ -74,6 +97,13 @@ class StubQueryService:
     @property
     def endpoint(self) -> str:
         return "http://127.0.0.1:54321/query"
+
+
+@pytest.fixture(autouse=True)
+def stub_evolution_gold_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep rolling tests Docker-free while the production preflight is exercised."""
+
+    monkeypatch.setattr(rotation_run, "LiveSQLBenchFixture", StubFixture)
 
 
 class AdviceFakeClient:
@@ -466,6 +496,192 @@ def test_enabled_optimizer_runs_after_evolution_failure_only(
     }
     assert (evolution.run.path / "optimizer" / "advice.json").is_file()
     assert (evolution.run.path / "optimizer" / "receipt.json").is_file()
+
+
+def test_evolution_discards_invalid_gold_cases_before_dsh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+
+    class CountingFailureRunner(TaskFailureStubDshRunner):
+        call_count = 0
+
+        def run(self, input) -> RunnerExecution:
+            type(self).call_count += 1
+            return super().run(input)
+
+    SelectivePreflightFixture.failing_case_count = 2
+    SelectivePreflightFixture.call_count = 0
+    monkeypatch.setattr(rotation_run, "LiveSQLBenchFixture", SelectivePreflightFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", CountingFailureRunner
+    )
+    subject = _subject("partial-invalid")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+
+    outcome = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        allow_ungated_evolution=True,
+    )
+
+    assert outcome.status == "partial_evaluator_invalid"
+    assert CountingFailureRunner.call_count == len(evolution_suite.cases) - 2
+    assert outcome.discarded_evaluator_invalid_count == 2
+    assert outcome.optimizable_failure_count == len(evolution_suite.cases) - 2
+    assert outcome.comparison_key is None
+    assert outcome.public_result["macro_average"] is None
+    agent_input = json.loads(
+        (outcome.run.path / "agent-input" / "trajectory.json").read_text(encoding="utf-8")
+    )
+    assert len(agent_input["trajectories"]) == len(evolution_suite.cases) - 2
+    receipt = next(evolution_suite.custody.preflight_root.glob("*.json")).read_text(
+        encoding="utf-8"
+    )
+    assert '"discarded_evaluator_invalid_count": 2' in receipt
+    assert evolution_suite.cases[0].instance_id not in receipt
+
+
+def test_evolution_with_no_valid_gold_case_never_starts_dsh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+
+    class UnexpectedRunner:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def run(self, input) -> RunnerExecution:
+            del input
+            raise AssertionError("preflight-rejected case must not start DSH")
+
+    SelectivePreflightFixture.failing_case_count = len(evolution_suite.cases)
+    SelectivePreflightFixture.call_count = 0
+    monkeypatch.setattr(rotation_run, "LiveSQLBenchFixture", SelectivePreflightFixture)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.DshRunner", UnexpectedRunner)
+    subject = _subject("all-invalid")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+
+    outcome = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        allow_ungated_evolution=True,
+    )
+
+    assert outcome.status == "evaluator_invalid"
+    assert outcome.evaluations == ()
+    assert outcome.discarded_evaluator_invalid_count == len(evolution_suite.cases)
+
+
+def test_evolution_runner_error_remains_global_after_gold_case_discard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    SelectivePreflightFixture.failing_case_count = 1
+    SelectivePreflightFixture.call_count = 0
+    monkeypatch.setattr(rotation_run, "LiveSQLBenchFixture", SelectivePreflightFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", TimeoutStubDshRunner
+    )
+    subject = _subject("partial-with-runner-error")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+
+    outcome = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        allow_ungated_evolution=True,
+    )
+
+    assert outcome.status == "runner_invalid"
+    assert outcome.discarded_evaluator_invalid_count == 1
+
+
+def test_evolution_discards_runtime_evaluator_invalid_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+    call_count = 0
+
+    def fake_run_case(*args: object, **kwargs: object) -> tuple[object, object, CaseEvaluation]:
+        nonlocal call_count
+        del kwargs
+        case = args[0]
+        assert hasattr(case, "instance_id")
+        call_count += 1
+        runner_case = RunnerCaseOutput(
+            case_id=case.instance_id,
+            status="completed",
+            candidate_sql=None,
+            trajectory=(),
+        )
+        execution = RunnerExecution(
+            output=RunnerOutput(schema_version="v1", cases=(runner_case,)),
+            raw_output=b"{}\n",
+        )
+        evaluation = CaseEvaluation(
+            case_id=case.instance_id,
+            slice="test",
+            prompt="public test prompt",
+            verdict=(
+                Verdict.EVALUATOR_INVALID if call_count == 1 else Verdict.NO_SQL_GENERATED
+            ),
+            candidate_sql=None,
+            expected_query="SELECT 1",
+            detail=None,
+            expected_result=None,
+            actual_result=None,
+            usage={},
+        )
+        return runner_case, execution, evaluation
+
+    monkeypatch.setattr(rotation_run, "_run_case", fake_run_case)
+    subject = _subject("runtime-invalid")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+
+    outcome = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        allow_ungated_evolution=True,
+    )
+
+    assert call_count == len(evolution_suite.cases)
+    assert outcome.status == "partial_evaluator_invalid"
+    assert outcome.evaluable_case_count == len(evolution_suite.cases) - 1
+    assert outcome.discarded_evaluator_invalid_count == 1
+    assert outcome.public_result["evaluator_preflight"] == {
+        "selected_case_count": len(evolution_suite.cases),
+        "evaluable_case_count": len(evolution_suite.cases) - 1,
+        "discarded_evaluator_invalid_count": 1,
+        "optimizable_failure_count": 0,
+    }
 
 
 def _prepare_suites(

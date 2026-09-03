@@ -102,7 +102,10 @@ receipt 只保留审计用途，不能再运行或放行 Evolution。
 
 ### 创建并运行 Evolution
 
-Evolution 必须使用同一被测对象已经通过的 Smoke gate。它的 manifest 也会进行一次新的真实选题。
+Evolution 必须使用同一被测对象已经通过的 Smoke gate。它的 manifest 也会进行一次新的真实选题。启动 Evolution 后，
+trusted evaluator 会在 **DSH 或模型调用前**，使用临时 PostgreSQL fixture 对本次选中的 Gold SQL 做预检；这仍会启动 Docker，
+因此同样需要确认 image、成本与本机权限。预检失败的个别 case 不会启动 DSH，也不会出现在普通 run evidence 或优化器输入中；
+custody 仅保存带 manifest hash、计数与脱敏错误类别的最小 receipt。
 
 ```powershell
 uv run skill-evolve benchmark create-rotation-manifest $DataRoot --kind evolution
@@ -112,6 +115,11 @@ uv run skill-evolve benchmark run `
   livesqlbench-base-lite-evolution-v1 $DataRoot $DshManifest `
   --manifest <evolution-manifest-id> --candidate <candidate-id>
 ```
+
+如果预检/运行期只排除了部分 Gold 无效 case，run status 是 `partial_evaluator_invalid`：它不产生正式 macro score、
+cost 汇总或 comparison key，不能用于候选比较；但其余有效且失败 case 的脱敏轨迹仍可进入 Evolution 优化链路。
+若没有任何有效 case，仍是 `evaluator_invalid`；若有效 case 出现 `runner_invalid`，仍按全局 runner 故障停止。若部分无效
+但没有有效失败轨迹，cycle 会以 `no_optimizable_failure` 停止，不会调用优化 LLM。
 
 同一份既有 Evolution manifest 可以运行多个被测对象，或在 runner/evaluator 故障后用于审计重试；这不算新的
 题目暴露。普通 Smoke/Evolution 的脱敏 evidence 位于仓库的 `runs\<run-id>\`。未来优化 agent 如需诊断，

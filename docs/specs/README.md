@@ -24,3 +24,4 @@
 | 15 | v0.13 | 已完成 | [Smoke 固定 Simple/Moderate 配额与 4/5 Gate](15-v0.13-smoke-quota-and-gate.md) | [实施计划](../plans/15-v0.13-smoke-quota-and-gate.md) | [实现记录](../design/15-v0.13-smoke-quota-and-gate.md) |
 | 16 | v0.14 | 已完成 | [Smoke 3/5 Gate](16-v0.14-smoke-three-of-five-gate.md) | [实施计划](../plans/16-v0.14-smoke-three-of-five-gate.md) | [实现记录](../design/16-v0.14-smoke-three-of-five-gate.md) |
 | 17 | v0.15 | 已完成 | [受控自动进化循环](17-next-controlled-evolution-cycle.md) | [实施计划](../plans/17-v0.15-controlled-evolution-cycle.md) | [实现记录](../design/17-v0.15-controlled-evolution-cycle.md) |
+| 18 | v0.16 | 已完成 | [Evolution Gold Preflight 与部分无效 Case 隔离](18-next-evolution-gold-preflight-and-partial-invalid.md) | [实施计划](../plans/18-v0.16-evolution-gold-preflight-and-partial-invalid.md) | [实现记录](../design/18-v0.16-evolution-gold-preflight-and-partial-invalid.md) |

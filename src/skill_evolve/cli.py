@@ -65,7 +65,13 @@ app.add_typer(livesqlbench_app, name="livesqlbench")
 
 _LIVE_SQL_BENCH_ADAPTER_ID = "livesqlbench-base-lite"
 _EVOLUTION_RUN_STATUSES = frozenset(
-    {"passed", "task_failure", "runner_invalid", "evaluator_invalid"}
+    {
+        "passed",
+        "task_failure",
+        "runner_invalid",
+        "evaluator_invalid",
+        "partial_evaluator_invalid",
+    }
 )
 
 

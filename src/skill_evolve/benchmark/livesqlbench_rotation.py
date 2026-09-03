@@ -59,6 +59,7 @@ EVOLUTION_CASE_COUNT = 15
 RESERVE_CASES_PER_TIER = 5
 
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+_RUN_ID_PATTERN = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 _MANIFEST_ID_PATTERN = re.compile(r"^(?:smoke|evolution)-[0-9a-f]{24}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_MANIFEST_BYTES = 128 * 1024
@@ -191,6 +192,49 @@ class RotationCustody:
     @property
     def gate_root(self) -> Path:
         return self.root / "smoke-gates"
+
+    @property
+    def preflight_root(self) -> Path:
+        return self.root / "evolution-preflights"
+
+
+class EvolutionPreflightReceipt(StrictRotationModel):
+    """Custody-only aggregate for one Evolution Gold preflight."""
+
+    schema_version: Literal["v1"]
+    run_id: str
+    manifest_sha256: str
+    evaluator_version: str
+    selected_case_count: int
+    evaluable_case_count: int
+    discarded_evaluator_invalid_count: int
+    error_category_counts: dict[str, int]
+    receipt_sha256: str
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> EvolutionPreflightReceipt:
+        if _RUN_ID_PATTERN.fullmatch(self.run_id) is None:
+            raise ValueError("run ID is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", self.manifest_sha256) is None:
+            raise ValueError("manifest hash is invalid")
+        if not self.evaluator_version:
+            raise ValueError("evaluator version is invalid")
+        if min(
+            self.selected_case_count,
+            self.evaluable_case_count,
+            self.discarded_evaluator_invalid_count,
+        ) < 0:
+            raise ValueError("preflight counts must be non-negative")
+        if (
+            self.evaluable_case_count + self.discarded_evaluator_invalid_count
+            != self.selected_case_count
+        ):
+            raise ValueError("preflight counts are inconsistent")
+        if any(not key or value <= 0 for key, value in self.error_category_counts.items()):
+            raise ValueError("preflight error categories are invalid")
+        if sum(self.error_category_counts.values()) != self.discarded_evaluator_invalid_count:
+            raise ValueError("preflight error categories are inconsistent")
+        return self
 
 
 @dataclass(frozen=True)
@@ -464,6 +508,49 @@ def load_rotation_manifest(custody: RotationCustody, manifest_id: str) -> Rotati
     if manifest.manifest_id != manifest_id:
         raise RotationError("rotation manifest integrity check failed")
     return manifest
+
+
+def persist_evolution_preflight_receipt(
+    custody: RotationCustody,
+    *,
+    run_id: str,
+    manifest_sha256: str,
+    evaluator_version: str,
+    selected_case_count: int,
+    evaluable_case_count: int,
+    error_category_counts: dict[str, int],
+) -> EvolutionPreflightReceipt:
+    """Persist one aggregate-only preflight receipt without case material."""
+
+    try:
+        discarded_count = sum(error_category_counts.values())
+        draft = EvolutionPreflightReceipt(
+            schema_version="v1",
+            run_id=run_id,
+            manifest_sha256=manifest_sha256,
+            evaluator_version=evaluator_version,
+            selected_case_count=selected_case_count,
+            evaluable_case_count=evaluable_case_count,
+            discarded_evaluator_invalid_count=discarded_count,
+            error_category_counts=dict(sorted(error_category_counts.items())),
+            receipt_sha256="0" * 64,
+        )
+        receipt = draft.model_copy(
+            update={"receipt_sha256": _digest(draft, "receipt_sha256")}
+        )
+        custody.preflight_root.mkdir(exist_ok=True)
+        if custody.preflight_root.is_symlink() or not custody.preflight_root.is_dir():
+            raise RotationError("Evolution preflight custody is invalid")
+        _write_atomically(
+            custody.preflight_root / f"{run_id}.json",
+            _record_bytes(receipt),
+            "Evolution preflight receipt",
+        )
+    except RotationError:
+        raise
+    except (OSError, ValidationError, ValueError):
+        raise RotationError("Evolution preflight receipt could not be persisted") from None
+    return receipt
 
 
 def load_rotation_suite(

@@ -17,6 +17,7 @@ CycleStopReason = Literal[
     "completed",
     "smoke_gate_not_met",
     "evolution_invalid",
+    "no_optimizable_failure",
     "advice_not_proposed",
     "plan_not_proposed",
     "materialization_not_created",
@@ -76,6 +77,8 @@ class EvolutionGenerationReceipt:
     evolution_manifest_sha256: str | None = None
     evolution_run_id: str | None = None
     evolution_status: str | None = None
+    evolution_evaluable_case_count: int | None = None
+    evolution_discarded_evaluator_invalid_count: int | None = None
     advice_status: str | None = None
     plan_status: str | None = None
     materialization_status: str | None = None
@@ -90,9 +93,17 @@ class EvolutionGenerationReceipt:
                 split_candidate_id(self.child_candidate_id)
         except CandidateContractError as error:
             raise EvolutionCycleError("generation receipt candidate ID is invalid") from error
-        for value in (self.smoke_manifest_sha256, self.evolution_manifest_sha256):
-            if value is not None and _SHA256_PATTERN.fullmatch(value) is None:
+        for manifest_hash in (self.smoke_manifest_sha256, self.evolution_manifest_sha256):
+            if manifest_hash is not None and _SHA256_PATTERN.fullmatch(manifest_hash) is None:
                 raise EvolutionCycleError("generation receipt manifest hash is invalid")
+        for evaluator_count in (
+            self.evolution_evaluable_case_count,
+            self.evolution_discarded_evaluator_invalid_count,
+        ):
+            if evaluator_count is not None and (
+                not isinstance(evaluator_count, int) or evaluator_count < 0
+            ):
+                raise EvolutionCycleError("generation receipt evaluator counts are invalid")
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -104,6 +115,10 @@ class EvolutionGenerationReceipt:
             "evolution_manifest_sha256": self.evolution_manifest_sha256,
             "evolution_run_id": self.evolution_run_id,
             "evolution_status": self.evolution_status,
+            "evolution_evaluable_case_count": self.evolution_evaluable_case_count,
+            "evolution_discarded_evaluator_invalid_count": (
+                self.evolution_discarded_evaluator_invalid_count
+            ),
             "advice_status": self.advice_status,
             "plan_status": self.plan_status,
             "materialization_status": self.materialization_status,

@@ -202,8 +202,17 @@ def _run_generation(
         evolution_manifest_sha256=evolution_manifest.manifest_sha256,
         evolution_run_id=evolution_outcome.run.run_id,
         evolution_status=evolution_outcome.status,
+        evolution_evaluable_case_count=getattr(evolution_outcome, "evaluable_case_count", None),
+        evolution_discarded_evaluator_invalid_count=getattr(
+            evolution_outcome, "discarded_evaluator_invalid_count", None
+        ),
     )
     if evolution_outcome.status in {"runner_invalid", "evaluator_invalid"}:
+        return receipt
+    if (
+        evolution_outcome.status == "partial_evaluator_invalid"
+        and getattr(evolution_outcome, "optimizable_failure_count", 0) == 0
+    ):
         return receipt
 
     advice = advise_after_evolution(
@@ -279,6 +288,8 @@ def _stop_reason_for(receipt: EvolutionGenerationReceipt) -> CycleStopReason:
         return "smoke_gate_not_met"
     if receipt.evolution_status in {"runner_invalid", "evaluator_invalid"}:
         return "evolution_invalid"
+    if receipt.evolution_status == "partial_evaluator_invalid" and receipt.advice_status is None:
+        return "no_optimizable_failure"
     if receipt.advice_status != "proposed":
         return "advice_not_proposed"
     if receipt.plan_status != "proposed":

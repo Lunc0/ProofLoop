@@ -22,8 +22,10 @@ from skill_evolve.benchmark.livesqlbench_rotation import (
     ROTATION_TIERS,
     SMOKE_CASE_COUNT,
     RotationCustody,
+    RotationError,
     RotationLiveSQLBenchSuite,
     StrictRotationModel,
+    persist_evolution_preflight_receipt,
 )
 from skill_evolve.benchmark.livesqlbench_run import (
     _EVALUATOR_VERSION,
@@ -31,7 +33,7 @@ from skill_evolve.benchmark.livesqlbench_run import (
     _run_case,
     _write_runner_artifacts,
 )
-from skill_evolve.config.models import DshConfig, ModelConfig, OptimizerConfig
+from skill_evolve.config.models import DshConfig, EvaluatorConfig, ModelConfig, OptimizerConfig
 from skill_evolve.evaluator.core import CaseEvaluation, Verdict
 from skill_evolve.optimizer.client import OptimizerClient
 from skill_evolve.optimizer.contracts import OptimizationResult
@@ -44,7 +46,7 @@ from skill_evolve.runner.contracts import (
     RunnerExecution,
     RunnerOutput,
 )
-from skill_evolve.sql.livesqlbench import LiveSQLBenchFixtureError
+from skill_evolve.sql.livesqlbench import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.subject import RunSubject
 from skill_evolve.trajectory.agent_input import build_evolution_agent_input
 from skill_evolve.trajectory.compressor import (
@@ -54,7 +56,13 @@ from skill_evolve.trajectory.compressor import (
 )
 from skill_evolve.trajectory.contracts import CompressedTrajectory
 
-RollingRunStatus = Literal["passed", "task_failure", "runner_invalid", "evaluator_invalid"]
+RollingRunStatus = Literal[
+    "passed",
+    "task_failure",
+    "runner_invalid",
+    "evaluator_invalid",
+    "partial_evaluator_invalid",
+]
 SMOKE_MINIMUM_PASSED_CASES: Literal[3] = 3
 
 
@@ -106,10 +114,20 @@ class RotationRunOutcome:
     comparison_key: str | None
     evaluations: tuple[CaseEvaluation, ...]
     public_result: dict[str, Any]
+    evaluable_case_count: int | None = None
+    discarded_evaluator_invalid_count: int | None = None
+    optimizable_failure_count: int | None = None
 
     @property
     def exit_code(self) -> int:
         return 2 if self.status in {"runner_invalid", "evaluator_invalid"} else 0
+
+
+@dataclass(frozen=True)
+class _EvolutionPreflight:
+    eligible_cases: tuple[LiveSQLBenchCase, ...]
+    error_category_counts: dict[str, int]
+    infrastructure_invalid: bool = False
 
 
 def run_rotation_dsh_suite(
@@ -150,8 +168,38 @@ def run_rotation_dsh_suite(
     omitted_agent_cases: list[dict[str, str]] = []
     stderr_parts: list[str] = []
     infrastructure_status: RollingRunStatus | None = None
+    preflight: _EvolutionPreflight | None = None
+    discarded_evaluator_invalid_count = 0
 
-    for case in suite.cases:
+    if suite.kind == "evolution":
+        try:
+            preflight = _preflight_evolution_cases(suite)
+        except LiveSQLBenchFixtureError:
+            preflight = _EvolutionPreflight(
+                eligible_cases=(),
+                error_category_counts={"fixture_unavailable": len(suite.cases)},
+                infrastructure_invalid=True,
+            )
+        try:
+            persist_evolution_preflight_receipt(
+                suite.custody,
+                run_id=run.run_id,
+                manifest_sha256=suite.manifest.manifest_sha256,
+                evaluator_version=_EVALUATOR_VERSION,
+                selected_case_count=len(suite.cases),
+                evaluable_case_count=len(preflight.eligible_cases),
+                error_category_counts=preflight.error_category_counts,
+            )
+        except RotationError as error:
+            raise RotationRunError("Evolution preflight evidence could not be persisted") from error
+        discarded_evaluator_invalid_count = sum(preflight.error_category_counts.values())
+        if preflight.infrastructure_invalid:
+            infrastructure_status = "evaluator_invalid"
+        cases_to_run = preflight.eligible_cases
+    else:
+        cases_to_run = suite.cases
+
+    for case in cases_to_run:
         try:
             runner_case, execution, evaluation = _run_case(
                 case,
@@ -169,6 +217,9 @@ def run_rotation_dsh_suite(
         except RunnerError:
             infrastructure_status = "runner_invalid"
             break
+        if suite.kind == "evolution" and evaluation.verdict is Verdict.EVALUATOR_INVALID:
+            discarded_evaluator_invalid_count += 1
+            continue
         evaluations.append(evaluation)
         runner_cases.append(runner_case)
         trajectories.append(_public_trajectory(runner_case))
@@ -201,9 +252,16 @@ def run_rotation_dsh_suite(
             tuple(agent_cases),
             tuple(omitted_agent_cases),
         )
-    status = _status_for(evaluations, infrastructure_status)
+    status = _status_for(
+        evaluations,
+        infrastructure_status,
+        suite.kind,
+        discarded_evaluator_invalid_count,
+    )
     comparison_key = (
-        _comparison_key(suite, dsh_config, model) if suite.kind == "evolution" else None
+        _comparison_key(suite, dsh_config, model)
+        if suite.kind == "evolution" and status != "partial_evaluator_invalid"
+        else None
     )
     optimizer_result: OptimizationResult | None = None
     if suite.kind == "evolution":
@@ -223,6 +281,9 @@ def run_rotation_dsh_suite(
         tuple(evaluations),
         subject,
         optimizer_result,
+        discarded_evaluator_invalid_count if suite.kind == "evolution" else None,
+        len(evaluations) if suite.kind == "evolution" else None,
+        len(agent_cases) if suite.kind == "evolution" else None,
     )
     passed_case_count = sum(item.passed for item in outcome.evaluations)
     if suite.kind == "smoke" and meets_smoke_gate_policy(outcome.status, outcome.evaluations):
@@ -263,6 +324,44 @@ def _compress_evolution_case(
     if compressed.trace.trace_completeness == "partial_insufficient":
         return None, {"case_id": runner_case.case_id, "reason": "partial_insufficient"}
     return compressed, None
+
+
+def _preflight_evolution_cases(suite: RotationLiveSQLBenchSuite) -> _EvolutionPreflight:
+    """Return only cases whose trusted Gold SQL executes in the restored fixture."""
+
+    evaluator = EvaluatorConfig(version=_EVALUATOR_VERSION)
+    eligible_cases: list[LiveSQLBenchCase] = []
+    error_category_counts: Counter[str] = Counter()
+    with LiveSQLBenchFixture(
+        suite.dump_root,
+        (case.database_name for case in suite.cases),
+        evaluator,
+    ) as fixture:
+        for case in suite.cases:
+            execution = fixture.for_database(case.database_name).execute_read_only(case.gold_sql)
+            if execution.ok:
+                eligible_cases.append(case)
+            else:
+                error_category_counts[_evaluator_error_category(execution.error)] += 1
+    return _EvolutionPreflight(
+        eligible_cases=tuple(eligible_cases),
+        error_category_counts=dict(sorted(error_category_counts.items())),
+    )
+
+
+def _evaluator_error_category(error: str | None) -> str:
+    """Classify a database error without retaining its private text or identifiers."""
+
+    normalized = (error or "").lower()
+    if "syntax error" in normalized:
+        return "syntax_error"
+    if "does not exist" in normalized:
+        return "undefined_reference"
+    if "permission denied" in normalized:
+        return "permission_denied"
+    if "timeout" in normalized:
+        return "timeout"
+    return "database_error"
 
 
 def _session_artifact_for_case(
@@ -363,15 +462,22 @@ def compare_evolution_results(
 
 
 def _status_for(
-    evaluations: list[CaseEvaluation], infrastructure_status: RollingRunStatus | None
+    evaluations: list[CaseEvaluation],
+    infrastructure_status: RollingRunStatus | None,
+    kind: str,
+    discarded_evaluator_invalid_count: int,
 ) -> RollingRunStatus:
     if infrastructure_status is not None:
         return infrastructure_status
     verdicts = {evaluation.verdict for evaluation in evaluations}
-    if Verdict.EVALUATOR_INVALID in verdicts:
-        return "evaluator_invalid"
     if Verdict.RUNNER_ERROR in verdicts:
         return "runner_invalid"
+    if kind == "evolution" and discarded_evaluator_invalid_count > 0:
+        if not evaluations:
+            return "evaluator_invalid"
+        return "partial_evaluator_invalid"
+    if Verdict.EVALUATOR_INVALID in verdicts:
+        return "evaluator_invalid"
     if any(not evaluation.passed for evaluation in evaluations):
         return "task_failure"
     return "passed"
@@ -432,6 +538,9 @@ def _write_final_evidence(
     evaluations: tuple[CaseEvaluation, ...],
     subject: RunSubject,
     optimizer_result: OptimizationResult | None,
+    discarded_evaluator_invalid_count: int | None,
+    evaluable_case_count: int | None,
+    optimizable_failure_count: int | None,
 ) -> RotationRunOutcome:
     public_evaluations = [public_evaluation_dict(item) for item in evaluations]
     tier_metrics = _tier_metrics(suite, evaluations)
@@ -452,6 +561,13 @@ def _write_final_evidence(
         "cost_usd": _total_cost(evaluations, len(suite.cases)),
         "cases": public_evaluations,
     }
+    if discarded_evaluator_invalid_count is not None:
+        result["evaluator_preflight"] = {
+            "selected_case_count": len(suite.cases),
+            "evaluable_case_count": evaluable_case_count,
+            "discarded_evaluator_invalid_count": discarded_evaluator_invalid_count,
+            "optimizable_failure_count": optimizable_failure_count,
+        }
     if comparison_key is not None:
         result["comparison_key"] = comparison_key
     if optimizer_result is not None:
@@ -473,6 +589,9 @@ def _write_final_evidence(
         comparison_key=comparison_key,
         evaluations=evaluations,
         public_result=result,
+        evaluable_case_count=evaluable_case_count,
+        discarded_evaluator_invalid_count=discarded_evaluator_invalid_count,
+        optimizable_failure_count=optimizable_failure_count,
     )
 
 

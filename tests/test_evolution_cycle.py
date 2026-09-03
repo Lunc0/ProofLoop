@@ -170,6 +170,120 @@ def test_cycle_stops_when_a_child_smoke_gate_is_missing(
     assert not provider_called
 
 
+def test_cycle_continues_after_partial_evaluator_invalid_with_valid_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = _candidate("sql-agent/000-baseline")
+    candidates = _FakeCandidates({baseline.candidate_id: baseline})
+    run_store = RunStore(tmp_path / "runs")
+    calls: list[str] = []
+    monkeypatch.setattr(cycle_service, "load_manifest", lambda path: _manifest(enabled=False))
+    monkeypatch.setattr(cycle_service, "_ensure_rotation_reserve", lambda *args: None)
+    monkeypatch.setattr(cycle_service, "create_rotation_manifest", _fake_manifest_creator())
+    monkeypatch.setattr(cycle_service, "load_rotation_suite", _fake_suite_loader)
+
+    def fake_runner(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        run = run_store.create()
+        run.write_json("result.json", {"status": "partial_evaluator_invalid"})
+        return SimpleNamespace(
+            run=run,
+            status="partial_evaluator_invalid",
+            evaluations=(),
+            evaluable_case_count=13,
+            discarded_evaluator_invalid_count=2,
+            optimizable_failure_count=1,
+        )
+
+    def fake_advice(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        calls.append("advice")
+        return _advice_result("proposed")
+
+    def fake_plan(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        calls.append("plan")
+        return _plan_result("proposed")
+
+    def fake_materialize(
+        run: object, subject: object, candidate_service: object, candidate_name: str
+    ) -> object:
+        del run, subject, candidate_service
+        calls.append("materialize")
+        child_id = f"sql-agent/{candidate_name}"
+        candidates.items[child_id] = _candidate(child_id, parent_candidate_id=baseline.candidate_id)
+        return _materialization_result(child_id)
+
+    monkeypatch.setattr(cycle_service, "run_rotation_dsh_suite", fake_runner)
+    monkeypatch.setattr(cycle_service, "advise_after_evolution", fake_advice)
+    monkeypatch.setattr(cycle_service, "plan_after_evolution", fake_plan)
+    monkeypatch.setattr(cycle_service, "materialize_after_evolution", fake_materialize)
+
+    receipt = cycle_service.run_evolution_cycle(
+        EvolutionCycleRequest("sql-agent/000-baseline", 1, "evolution"),
+        tmp_path / "data",
+        tmp_path / "dsh.yaml",
+        candidate_service=candidates,
+        repository_root=tmp_path,
+        candidate_store_root=tmp_path / "candidates",
+        runs_root=tmp_path / "runs",
+        cycle_receipts_root=tmp_path / "cycle-receipts",
+    )
+
+    assert receipt.stop_reason == "completed"
+    assert calls == ["advice", "plan", "materialize"]
+    generation = receipt.generations[0]
+    assert generation.evolution_status == "partial_evaluator_invalid"
+    assert generation.evolution_evaluable_case_count == 13
+    assert generation.evolution_discarded_evaluator_invalid_count == 2
+
+
+def test_cycle_skips_optimizer_when_partial_run_has_no_valid_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = _candidate("sql-agent/000-baseline")
+    candidates = _FakeCandidates({baseline.candidate_id: baseline})
+    run_store = RunStore(tmp_path / "runs")
+    monkeypatch.setattr(cycle_service, "load_manifest", lambda path: _manifest(enabled=False))
+    monkeypatch.setattr(cycle_service, "_ensure_rotation_reserve", lambda *args: None)
+    monkeypatch.setattr(cycle_service, "create_rotation_manifest", _fake_manifest_creator())
+    monkeypatch.setattr(cycle_service, "load_rotation_suite", _fake_suite_loader)
+
+    def fake_runner(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        run = run_store.create()
+        run.write_json("result.json", {"status": "partial_evaluator_invalid"})
+        return SimpleNamespace(
+            run=run,
+            status="partial_evaluator_invalid",
+            evaluations=(),
+            evaluable_case_count=13,
+            discarded_evaluator_invalid_count=2,
+            optimizable_failure_count=0,
+        )
+
+    def unexpected_advice(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("empty valid failure set must not call the optimizer")
+
+    monkeypatch.setattr(cycle_service, "run_rotation_dsh_suite", fake_runner)
+    monkeypatch.setattr(cycle_service, "advise_after_evolution", unexpected_advice)
+
+    receipt = cycle_service.run_evolution_cycle(
+        EvolutionCycleRequest("sql-agent/000-baseline", 1, "evolution"),
+        tmp_path / "data",
+        tmp_path / "dsh.yaml",
+        candidate_service=candidates,
+        repository_root=tmp_path,
+        candidate_store_root=tmp_path / "candidates",
+        runs_root=tmp_path / "runs",
+        cycle_receipts_root=tmp_path / "cycle-receipts",
+    )
+
+    assert receipt.stop_reason == "no_optimizable_failure"
+    assert receipt.generations[0].advice_status is None
+
+
 def test_cycle_rejects_enabled_manifest_optimizer_before_candidate_or_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
