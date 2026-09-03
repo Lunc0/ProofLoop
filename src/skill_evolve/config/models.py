@@ -114,7 +114,7 @@ class OptimizerConfig(StrictModel):
     model: Literal["deepseek-v4-flash"] = "deepseek-v4-flash"
     api_key_env: Literal["DEEPSEEK_API_KEY"] = "DEEPSEEK_API_KEY"
     timeout_ms: int = Field(default=30_000, ge=1_000, le=300_000)
-    max_output_tokens: int = Field(default=2_000, ge=64, le=16_384)
+    max_output_tokens: int | None = Field(default=None, ge=64)
     max_input_bytes: int = Field(default=524_288, ge=1_024, le=2_097_152)
     prompt_version: Literal["skill-optimization-advice-prompt-v1"] = (
         "skill-optimization-advice-prompt-v1"

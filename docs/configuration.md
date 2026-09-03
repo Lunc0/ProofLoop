@@ -81,6 +81,10 @@ environment:
 异常或 stdout。未启用或该变量不可用时，Evolution 评测仍照常结束，run 只写 optimizer 的 `unavailable`
 receipt，不会进行网络请求。
 
+`max_output_tokens` 是可选的应用层输出限制。省略或设为 `null` 时，请求不发送 `max_tokens`，本项目也不按
+token 数推导响应字节上限；DeepSeek 的自身限制、timeout 与计费仍有效。显式设置正整数时，项目会把它传给
+provider，并保留对应的本地响应大小检查。
+
 首次使用时，在仓库根目录执行：
 
 ```powershell

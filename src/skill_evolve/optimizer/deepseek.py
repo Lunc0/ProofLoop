@@ -58,9 +58,10 @@ class DeepSeekChatClient:
             ],
             "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
-            "max_tokens": config.max_output_tokens,
             "stream": False,
         }
+        if config.max_output_tokens is not None:
+            body["max_tokens"] = config.max_output_tokens
         request = Request(
             _DEEPSEEK_CHAT_COMPLETIONS_URL,
             data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
@@ -82,7 +83,10 @@ class DeepSeekChatClient:
             usage = _response_usage(response)
         except (TypeError, UnicodeDecodeError, ValueError) as error:
             raise OptimizerRequestError("optimizer response was invalid") from error
-        if len(content.encode("utf-8")) > config.max_output_tokens * 16:
+        if (
+            config.max_output_tokens is not None
+            and len(content.encode("utf-8")) > config.max_output_tokens * 16
+        ):
             raise OptimizerRequestError("optimizer response exceeded the configured limit")
         return OptimizerClientResponse(content=content, usage=usage)
 

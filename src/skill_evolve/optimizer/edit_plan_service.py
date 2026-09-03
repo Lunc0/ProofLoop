@@ -166,7 +166,10 @@ def plan_after_evolution(
         )
 
     try:
-        if len(response.content.encode("utf-8")) > optimizer.max_output_tokens * 16:
+        if (
+            optimizer.max_output_tokens is not None
+            and len(response.content.encode("utf-8")) > optimizer.max_output_tokens * 16
+        ):
             raise ValueError("optimizer response exceeded the configured limit")
         model_plan = ModelEditPlan.model_validate_json(response.content)
         plan = _bind_plan(

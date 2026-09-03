@@ -62,7 +62,28 @@ def test_request_is_one_json_completion_without_tools() -> None:
     assert body["model"] == "deepseek-v4-flash"
     assert body["thinking"] == {"type": "disabled"}
     assert body["response_format"] == {"type": "json_object"}
+    assert "max_tokens" not in body
     assert "tools" not in body
+
+
+def test_explicit_output_limit_is_sent_and_enforced() -> None:
+    requests: list[Request] = []
+    oversized_content = "x" * 1_025
+
+    def opener(request: Request, timeout: float) -> tuple[int, bytes]:
+        del timeout
+        requests.append(request)
+        return 200, json.dumps(
+            {"choices": [{"message": {"content": oversized_content}}]}
+        ).encode("utf-8")
+
+    client = DeepSeekChatClient(environ={"DEEPSEEK_API_KEY": "test-value"}, opener=opener)
+
+    with pytest.raises(OptimizerRequestError, match="configured limit"):
+        client.advise("system", "user", OptimizerConfig(enabled=True, max_output_tokens=64))
+
+    body = json.loads(requests[0].data.decode("utf-8"))
+    assert body["max_tokens"] == 64
 
 
 def test_local_dotenv_api_key_is_used_without_persisting_it(tmp_path: Path) -> None:

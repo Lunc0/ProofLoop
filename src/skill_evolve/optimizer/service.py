@@ -83,7 +83,10 @@ def advise_after_evolution(
             run, optimizer, "model_failed", source=source, error_code="request_failed"
         )
     try:
-        if len(response.content.encode("utf-8")) > optimizer.max_output_tokens * 16:
+        if (
+            optimizer.max_output_tokens is not None
+            and len(response.content.encode("utf-8")) > optimizer.max_output_tokens * 16
+        ):
             raise ValueError("optimizer response exceeded the configured limit")
         model_advice = ModelAdvice.model_validate_json(response.content)
         _validate_case_bindings(model_advice, payload)
