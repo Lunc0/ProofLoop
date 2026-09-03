@@ -265,7 +265,10 @@ def test_guarded_target_is_proposed_but_locked_target_is_rejected(
     )
     assert locked.receipt.status == "invalid_response"
     artifact_dir = run.path / "optimizer" / "edit-plan"
-    assert {path.name for path in artifact_dir.iterdir()} == {"receipt.json"}
+    assert {path.name for path in artifact_dir.iterdir()} == {
+        "raw-response.txt",
+        "receipt.json",
+    }
 
 
 def test_unknown_evidence_and_invalid_runner_never_leave_partial_plan(tmp_path: Path) -> None:
@@ -284,9 +287,14 @@ def test_unknown_evidence_and_invalid_runner_never_leave_partial_plan(tmp_path: 
     )
     assert invalid_response.receipt.status == "invalid_response"
     assert len(unknown_client.calls) == 1
-    assert {path.name for path in (run.path / "optimizer" / "edit-plan").iterdir()} == {
-        "receipt.json"
+    artifact_dir = run.path / "optimizer" / "edit-plan"
+    assert {path.name for path in artifact_dir.iterdir()} == {
+        "raw-response.txt",
+        "receipt.json",
     }
+    assert "evidence-999-999-0123456789ab" in (
+        artifact_dir / "raw-response.txt"
+    ).read_text(encoding="utf-8")
 
     skipped_client = DynamicPlanClient()
     skipped = plan_after_evolution(
@@ -342,6 +350,12 @@ def test_private_path_in_semantic_text_is_rejected(tmp_path: Path) -> None:
 
     assert result.receipt.status == "invalid_response"
     assert not (run.path / "optimizer" / "edit-plan" / "edit-plan.json").exists()
+    raw_response = json.loads(
+        (run.path / "optimizer" / "edit-plan" / "raw-response.txt").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert raw_response["edits"][0]["intent"] == "Read C:\\private\\custody\\answer.sql first."
 
 
 def test_dbhub_statement_conflict_is_compatibility_finding_not_proven_cause(

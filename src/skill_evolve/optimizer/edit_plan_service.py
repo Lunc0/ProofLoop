@@ -44,6 +44,7 @@ from skill_evolve.trajectory.contracts import EvolutionAgentInputV3
 
 _PROMPT_VERSION: Literal["skill-edit-plan-prompt-v1"] = "skill-edit-plan-prompt-v1"
 _ARTIFACT_DIRECTORY = "optimizer/edit-plan"
+_RAW_RESPONSE_FILENAME = "raw-response.txt"
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\[^\\\s]+[\\/])")
 _POSIX_PRIVATE_PATH = re.compile(r"/(?:home|users|tmp|var|etc)(?:/|\b)", re.IGNORECASE)
 _SECRET_SHAPE = re.compile(
@@ -185,6 +186,7 @@ def plan_after_evolution(
             source=source,
             skill_map_sha256=skill_map_sha256,
             error_code="invalid_response",
+            raw_response=response.content,
         )
 
     plan_bytes = canonical_json_bytes(plan.model_dump(mode="json"))
@@ -499,6 +501,7 @@ def _terminal_result(
     source: EditPlanSource | None = None,
     skill_map_sha256: str | None = None,
     error_code: EditPlanErrorCode | None = None,
+    raw_response: str | None = None,
 ) -> EditPlanResult:
     receipt = EditPlanReceipt(
         status=status,
@@ -509,10 +512,10 @@ def _terminal_result(
         skill_map_sha256=skill_map_sha256,
         error_code=error_code,
     )
-    _publish_artifacts(
-        run,
-        {"receipt.json": canonical_json_bytes(receipt.model_dump(mode="json")) + b"\n"},
-    )
+    artifacts = {"receipt.json": canonical_json_bytes(receipt.model_dump(mode="json")) + b"\n"}
+    if raw_response is not None:
+        artifacts[_RAW_RESPONSE_FILENAME] = raw_response.encode("utf-8")
+    _publish_artifacts(run, artifacts)
     return EditPlanResult(receipt=receipt, plan_path=None, skill_map_path=None)
 
 
