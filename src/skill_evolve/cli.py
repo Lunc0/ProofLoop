@@ -71,6 +71,7 @@ _EVOLUTION_RUN_STATUSES = frozenset(
         "runner_invalid",
         "evaluator_invalid",
         "partial_evaluator_invalid",
+        "partial_runner_error",
     }
 )
 

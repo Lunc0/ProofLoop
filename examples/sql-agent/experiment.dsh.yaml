@@ -31,6 +31,9 @@ environment:
     numeric_tolerance: 0
     max_rows: 1000
     timeout_ms: 5000
+  optimizer:
+    enabled: false
+    max_input_bytes: 1572864
 
 cases:
   - id: customer-count

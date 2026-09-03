@@ -72,6 +72,7 @@ environment:
     provider: deepseek
     model: deepseek-v4-flash
     api_key_env: DEEPSEEK_API_KEY
+    max_input_bytes: 1572864  # 1.5 MiB
 ```
 
 `api_key_env`（DSH settings 中常写作 `apiKeyEnv`）是环境变量**名称**，不是密钥值。优化器按以下顺序

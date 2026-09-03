@@ -170,8 +170,11 @@ def test_cycle_stops_when_a_child_smoke_gate_is_missing(
     assert not provider_called
 
 
-def test_cycle_continues_after_partial_evaluator_invalid_with_valid_projection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "partial_status", ["partial_evaluator_invalid", "partial_runner_error"]
+)
+def test_cycle_continues_after_optimizable_partial_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partial_status: str
 ) -> None:
     baseline = _candidate("sql-agent/000-baseline")
     candidates = _FakeCandidates({baseline.candidate_id: baseline})
@@ -185,10 +188,10 @@ def test_cycle_continues_after_partial_evaluator_invalid_with_valid_projection(
     def fake_runner(*args: object, **kwargs: object) -> object:
         del args, kwargs
         run = run_store.create()
-        run.write_json("result.json", {"status": "partial_evaluator_invalid"})
+        run.write_json("result.json", {"status": partial_status})
         return SimpleNamespace(
             run=run,
-            status="partial_evaluator_invalid",
+            status=partial_status,
             evaluations=(),
             evaluable_case_count=13,
             discarded_evaluator_invalid_count=2,
@@ -233,7 +236,7 @@ def test_cycle_continues_after_partial_evaluator_invalid_with_valid_projection(
     assert receipt.stop_reason == "completed"
     assert calls == ["advice", "plan", "materialize"]
     generation = receipt.generations[0]
-    assert generation.evolution_status == "partial_evaluator_invalid"
+    assert generation.evolution_status == partial_status
     assert generation.evolution_evaluable_case_count == 13
     assert generation.evolution_discarded_evaluator_invalid_count == 2
 

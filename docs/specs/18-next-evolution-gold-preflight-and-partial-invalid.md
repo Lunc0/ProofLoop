@@ -21,6 +21,7 @@
    - 有效 case 的失败仍保留其既有任务/runner verdict；仅这些有效失败 case 可进入 Evolution optimizer projection。
 5. `evolution cycle` 在 `partial_evaluator_invalid` 下，仅当 optimizer projection 至少含一个有效失败 case 时继续调用 advice、EditPlan 与 materialization；若没有有效失败 case，停止且不调用优化 LLM。
 6. evaluator custody 保存不可变、最小化的 preflight receipt：manifest hash、evaluator/image fingerprint、选中数、可评估数、排除数、按脱敏类别汇总的计数和 receipt digest。它不得改变既有 manifest、reserve 或 Gold 数据。
+7. Evolution 的单 case `runner_error` 不再中断整条 cycle：将其排除并记录安全 aggregate，剩余有效 case 继续评测与优化。超时且已有可行动脱敏 session 的 case 可作为优化轨迹；非超时、无 session、不可压缩或 runner 级异常仅被排除，不能进入优化器。仅当既无有效评测 case、也无可行动 timeout 轨迹时为 `runner_invalid`。Smoke 与 Final 不适用此行为。
 
 ## 3. 非目标
 
@@ -29,6 +30,7 @@
 - 不把被排除 case 的 prompt、轨迹、candidate SQL、Gold、原始 PostgreSQL 错误或身份传给优化器。
 - 不新增 SQL dialect、并发、依赖、云服务、后台任务、自动 promotion、rollback 或 push。
 - 不把 `partial_evaluator_invalid` 解释为通过、candidate 得分或可与完整 Evolution run 比较的结果。
+- 不把任意 `runner_error` 一律当作可优化失败，或把没有可行动脱敏证据的 runner 错误送入优化器。
 
 ## 4. 约束与安全边界
 
@@ -38,6 +40,7 @@
 - 使用既有 disposable fixture、只读执行器、argv array 与 `shell=False`；所有临时容器在成功、异常和超时路径均清理。
 - 验证 manifest、GT、dump、custody 路径、hash 和 runner 输出；保持 Gold、GT、凭据与 session 隔离。
 - optimizer 输入必须只从已完成评测且 verdict 非 `evaluator_invalid` 的失败 case 派生。
+- `partial_runner_error` 必须表示至少一个 case 级 runner 错误被排除且仍存在有效评测 case 或可行动 timeout 轨迹；只有超时且可压缩的轨迹可以进入优化器。
 
 ### 需先确认
 
@@ -60,9 +63,9 @@ frozen Evolution manifest
   -> valid failed cases only -> optimizer projection
 ```
 
-`partial_evaluator_invalid` 必须携带安全的 aggregate 计数，至少能区分 selected、evaluable、discarded 和 valid-failure 数；逐 case 诊断只保留在 evaluator custody。它使下游可以明确拒绝把本次运行当作完整评测，同时让 cycle 可在存在有效失败证据时继续。
+`partial_evaluator_invalid` 必须携带安全的 aggregate 计数，至少能区分 selected、evaluable、discarded 和 valid-failure 数；逐 case 诊断只保留在 evaluator custody。`partial_runner_error` 记录被排除的 runner 错误和可行动超时 aggregate，且同样没有完整指标、cost 或 comparison key。两者都使下游明确拒绝把本次运行当作完整评测，同时让 cycle 在存在有效失败证据时继续。
 
-现有 `passed`、`task_failure`、`runner_invalid`、`evaluator_invalid` 的完整运行语义保持；对 `partial_evaluator_invalid`，优化资格取决于有效失败投影，而不是把该状态降级为普通 `task_failure`。
+现有 `passed`、`task_failure`、`runner_invalid`、`evaluator_invalid` 的完整运行语义保持；对 `partial_evaluator_invalid` 与 `partial_runner_error`，优化资格取决于有效失败投影，而不是把状态降级为普通 `task_failure`。
 
 ## 6. 代码与测试范围
 
@@ -88,9 +91,10 @@ if discarded_evaluator_invalid_count > 0:
 2. 两个独立 Gold 失败的 fake case 不会中止剩余有效 case；有效失败轨迹仍进入 optimizer projection，且任何无效 case 的内容不进入 projection。
 3. 零个有效 case 时结果仍为 `evaluator_invalid`，cycle 不调用 advice、EditPlan 或 materialization。
 4. 有有效 case 且存在无效 case 时结果为 `partial_evaluator_invalid`；其完整分数、cost 与 comparison key 不可作为可比结论。
-5. 部分无效但没有有效失败 case 时，不调用优化 LLM；部分无效且存在有效失败 case 时，按既有 advice → EditPlan → materialization 顺序继续。
-6. receipt 与 CLI/cycle 输出只含安全 aggregate；Gold、原始 PostgreSQL 错误、case ID 与 custody 路径不泄漏。
-7. 定向 fake/stub 测试、`uv run ruff check .`、`uv run mypy src` 通过；真实 Docker preflight 仅在新授权后运行。
+5. 部分无效或部分 runner 错误但没有有效失败 case 时，不调用优化 LLM；存在有效失败 case 时，按既有 advice → EditPlan → materialization 顺序继续。
+6. 单 case `runner_error` 不停止 Evolution；非超时/不可压缩 runner 错误不进入 optimizer，超时且可压缩的轨迹可以进入。仅无有效评测 case 且无可行动 timeout 轨迹时，Evolution 才为 `runner_invalid`；Smoke 与 Final 仍 fail-closed。
+7. receipt 与 CLI/cycle 输出只含安全 aggregate；Gold、原始 PostgreSQL 错误、case ID 与 custody 路径不泄漏。
+8. 定向 fake/stub 测试、`uv run ruff check .`、`uv run mypy src` 通过；真实 Docker preflight 仅在新授权后运行。
 
 ## 8. 验证命令
 
@@ -108,6 +112,6 @@ git diff --check
 
 ## 9. 已确认事项与开放问题
 
-已确认：Evolution 中单个 `evaluator_invalid` case 应被抛弃，不能阻断仍有有效失败证据的优化链路；优化器只接收有效失败 case。
+已确认：Evolution 中单个 `evaluator_invalid` 或 `runner_error` case 应被抛弃，不能阻断仍有有效失败证据的优化链路；只有明确超时且带可行动脱敏 session 的 runner 轨迹可作为优化证据。优化器只接收这些可验证的失败证据。
 
 待确认：实施中若发现已冻结数据本身需修订，必须另行确认数据版本与 manifest 作废策略。

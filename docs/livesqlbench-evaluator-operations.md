@@ -121,6 +121,11 @@ cost 汇总或 comparison key，不能用于候选比较；但其余有效且失
 若没有任何有效 case，仍是 `evaluator_invalid`；若有效 case 出现 `runner_invalid`，仍按全局 runner 故障停止。若部分无效
 但没有有效失败轨迹，cycle 会以 `no_optimizable_failure` 停止，不会调用优化 LLM。
 
+Evolution 的单 case runner error 会被排除而不停止剩余 case，status 为 `partial_runner_error`（前提是仍有有效评测 case
+或可行动 timeout 轨迹）。DSH 明确超时且已有脱敏 session 成功压缩为可行动轨迹时，该轨迹可交给优化器以减少重复探索；无 session、
+不可压缩 timeout、进程退出或其他 runner 错误只被丢弃，不会进入优化器。它同样不是可比较的 benchmark 结果。Smoke 和 Final
+始终不放行任何 runner error。
+
 同一份既有 Evolution manifest 可以运行多个被测对象，或在 runner/evaluator 故障后用于审计重试；这不算新的
 题目暴露。普通 Smoke/Evolution 的脱敏 evidence 位于仓库的 `runs\<run-id>\`。未来优化 agent 如需诊断，
 只应获得指定 run 目录，不能获得 `rotation` custody 或 Final 目录。

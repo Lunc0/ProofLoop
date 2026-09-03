@@ -207,6 +207,39 @@ class TimeoutStubDshRunner(PassingStubDshRunner):
         )
 
 
+class UnrecoverableRunnerErrorStubDshRunner(PassingStubDshRunner):
+    def run(self, input) -> RunnerExecution:
+        case = input.cases[0]
+        output_case = RunnerCaseOutput(
+            case_id=case.id,
+            status="runner_error",
+            candidate_sql=None,
+            trajectory=(),
+            agent_execution=AgentExecution(status="error", error="DSH process exited with code 1"),
+        )
+        output = RunnerOutput(schema_version="v1", cases=(output_case,))
+        return RunnerExecution(
+            output=output,
+            raw_output=(output.model_dump_json() + "\n").encode(),
+            raw_artifacts=(
+                RawArtifact(
+                    relative_path=f"dsh/{case.id}.session.jsonl",
+                    content=_partial_session_jsonl(case.id),
+                ),
+            ),
+        )
+
+
+class MixedTaskFailureAndRunnerErrorStubDshRunner(PassingStubDshRunner):
+    call_count = 0
+
+    def run(self, input) -> RunnerExecution:
+        type(self).call_count += 1
+        if type(self).call_count % 2:
+            return TaskFailureStubDshRunner().run(input)
+        return UnrecoverableRunnerErrorStubDshRunner().run(input)
+
+
 class PartialSmokeStubDshRunner(PassingStubDshRunner):
     passed_case_count = 4
     call_count = 0
@@ -288,7 +321,7 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     timeout_input = (timeout.run.path / "agent-input" / "trajectory.json").read_text(
         encoding="utf-8"
     )
-    assert timeout.status == "runner_invalid"
+    assert timeout.status == "partial_runner_error"
     assert '"trace_completeness":"partial_actionable"' in timeout_input
     assert '"runner_outcome":"timeout"' in timeout_input
 
@@ -498,6 +531,76 @@ def test_enabled_optimizer_runs_after_evolution_failure_only(
     assert (evolution.run.path / "optimizer" / "receipt.json").is_file()
 
 
+def test_enabled_optimizer_uses_actionable_timeout_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", TimeoutStubDshRunner
+    )
+    subject = _subject("timeout-optimizer")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+    fake = AdviceFakeClient(evolution_suite.cases[0].instance_id)
+
+    outcome = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        OptimizerConfig(enabled=True),
+        optimizer_client=fake,
+        allow_ungated_evolution=True,
+    )
+
+    assert outcome.status == "partial_runner_error"
+    assert outcome.actionable_timeout_count == len(evolution_suite.cases)
+    assert len(fake.calls) == 1
+    assert outcome.public_result["optimizer"]["status"] == "proposed"
+
+
+def test_enabled_optimizer_ignores_unusable_runner_errors_with_valid_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    MixedTaskFailureAndRunnerErrorStubDshRunner.call_count = 0
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner",
+        MixedTaskFailureAndRunnerErrorStubDshRunner,
+    )
+    subject = _subject("mixed-runner-errors")
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+    fake = AdviceFakeClient(evolution_suite.cases[0].instance_id)
+
+    outcome = run_rotation_dsh_suite(
+        evolution_suite,
+        dsh_config,
+        None,
+        model,
+        tmp_path / "runs",
+        subject,
+        OptimizerConfig(enabled=True),
+        optimizer_client=fake,
+        allow_ungated_evolution=True,
+    )
+
+    assert outcome.status == "partial_runner_error"
+    assert outcome.discarded_runner_error_count == len(evolution_suite.cases) // 2
+    assert outcome.optimizable_failure_count == (len(evolution_suite.cases) + 1) // 2
+    assert len(fake.calls) == 1
+
+
 def test_evolution_discards_invalid_gold_cases_before_dsh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -587,7 +690,7 @@ def test_evolution_with_no_valid_gold_case_never_starts_dsh(
     assert outcome.discarded_evaluator_invalid_count == len(evolution_suite.cases)
 
 
-def test_evolution_runner_error_remains_global_after_gold_case_discard(
+def test_evolution_stops_when_runner_errors_leave_no_valid_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
@@ -599,7 +702,8 @@ def test_evolution_runner_error_remains_global_after_gold_case_discard(
     SelectivePreflightFixture.call_count = 0
     monkeypatch.setattr(rotation_run, "LiveSQLBenchFixture", SelectivePreflightFixture)
     monkeypatch.setattr(
-        "skill_evolve.benchmark.livesqlbench_run.DshRunner", TimeoutStubDshRunner
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner",
+        UnrecoverableRunnerErrorStubDshRunner,
     )
     subject = _subject("partial-with-runner-error")
     dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
