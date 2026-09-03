@@ -12,6 +12,7 @@
 - Type check: `uv run mypy src`
 - Test: `uv run pytest`
 - CLI: `uv run skill-evolve --help`
+- Validation: run targeted checks by default; run the full test suite only when the user asks, a release is being prepared, or the change is cross-cutting.
 
 ## Conventions
 
@@ -20,14 +21,16 @@
 - Treat runner output and manifests as untrusted input.
 - Use argv arrays and `shell=False` for subprocesses.
 
-## Stage documentation
+## Change classification and documentation
 
-- Treat a feature stage as `spec → plan → implementation → design`.
-- At the start of a proposed stage, write its project document in `docs/specs/`. State the goal, scope, non-goals, constraints, acceptance criteria, open questions, stage number, version, and status. Do this before technical planning or implementation.
-- Once the spec is approved and before coding, write the matching technical document in `docs/plans/`. State the implementation approach, affected modules or files, ordered tasks, checkpoints, risks, and verification. Link back to its spec.
-- After the stage is implemented and verified, write or update the matching document in `docs/design/` to describe the actual implementation, public contracts, safety or compatibility boundaries, and verification result. Do not leave planned work presented as implemented behavior.
+- Classify work before changing code. A **stage** introduces or changes a public contract, cross-module architecture, evaluation or candidate lifecycle, or a security/compatibility boundary. A **minor change** is a contained bug fix, refactor, test, documentation edit, or routine configuration adjustment. If unclear, treat it as a stage and ask.
+- A stage follows `spec → plan → implementation → design`. Before technical planning or implementation, create a spec in `docs/specs/` with the goal, scope, non-goals, constraints, acceptance criteria, open questions, stage number, version, and status.
+- Once the spec is approved and before coding, create its plan in `docs/plans/`: implementation approach, affected modules or files, ordered tasks, checkpoints, risks, and verification. Link it to the spec.
+- After implementation and verification, create or update its design record in `docs/design/`: actual implementation, public contracts, safety or compatibility boundaries, and verification result. Do not present planned work as implemented.
+- A minor change needs no new stage documents or index updates. Update an existing design record only when it changes an already documented public contract, safety boundary, or behavior that users need to understand.
 - Name spec and plan files `<stage>-<version>-<slug>.md`, where `<stage>` is a zero-padded sequence such as `05`. If the version has not been approved, use `next` and state `版本：未定`; assign a version before creating the plan.
-- Update `docs/specs/README.md` and `docs/plans/README.md` whenever a stage changes status or a new stage document is added. Do not create a plan without an approved spec; do not create a design record for an unimplemented stage.
+- For a stage, update the relevant `docs/*/README.md` indexes when its status changes or a stage document is added. Do not create a plan without an approved spec; do not create a design record for an unimplemented stage.
+- Read documentation selectively: normally load only the relevant current-stage document, its matching index, and the source/tests in scope. Do not traverse historical `docs/` files unless the task needs them. Link to prior decisions instead of repeating their background or constraints.
 
 ## Boundaries
 
