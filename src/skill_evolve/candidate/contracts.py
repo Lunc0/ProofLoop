@@ -105,7 +105,11 @@ class OptimizerProvenance(StrictCandidateModel):
     @field_validator("render_policy_version")
     @classmethod
     def validate_render_policy(cls, value: str) -> str:
-        if value != "skill-edit-render-policy-v1":
+        if value not in {
+            "skill-edit-render-policy-v1",
+            "skill-edit-render-policy-v2",
+            "skill-edit-render-policy-v3",
+        }:
             raise ValueError("unsupported optimizer render policy")
         return value
 

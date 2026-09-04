@@ -93,7 +93,7 @@ def test_plan_command_uses_existing_evolution_run_without_rerunning(
         "skill_map_path": "optimizer/edit-plan/skill-map.json",
         "provider": "deepseek",
         "model": "deepseek-v4-flash",
-        "prompt_version": "skill-edit-plan-prompt-v4",
+        "prompt_version": "skill-edit-plan-prompt-v5",
         "plan_sha256": "d" * 64,
         "skill_map_sha256": "c" * 64,
         "cluster_count": 2,

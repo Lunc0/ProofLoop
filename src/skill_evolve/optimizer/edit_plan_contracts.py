@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -13,9 +13,9 @@ from skill_evolve.optimizer.contracts import ProviderUsage
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _BLOCK_ID_PATTERN = re.compile(r"^b(?:0[1-9]|[1-9][0-9]*)$")
+_HEADING_BLOCK_ID_PATTERN = re.compile(r"^b[1-9][0-9]*(?:\.[1-9][0-9]*)*$")
 _LOCAL_REF_PATTERN = re.compile(r"^(?:case|evidence)-[0-9]{3}(?:-[0-9]{3})?-[0-9a-f]{12}$")
 _LOCAL_ID_PATTERN = re.compile(r"^(?:cluster|edit)-[0-9]{3}$")
-_CONTRACT_FIELD_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
 
 SkillPermission = Literal["locked", "guarded", "evolvable", "experimental"]
 SkillLayer = Literal["hard_contract", "core_strategy", "heuristics", "unknown"]
@@ -149,6 +149,49 @@ class SkillMap(StrictEditPlanModel):
         return self
 
 
+class HeadingSkillBlock(StrictEditPlanModel):
+    """One compact, model-visible Markdown heading block."""
+
+    block_id: str
+    heading: str = Field(min_length=1, max_length=256)
+    heading_level: int = Field(ge=1, le=6)
+    permission: SkillPermission
+
+    @field_validator("block_id")
+    @classmethod
+    def validate_block_id(cls, value: str) -> str:
+        if _HEADING_BLOCK_ID_PATTERN.fullmatch(value) is None:
+            raise ValueError("heading block_id has an invalid format")
+        return value
+
+    @field_validator("heading")
+    @classmethod
+    def validate_heading(cls, value: str) -> str:
+        if "\x00" in value or "\n" in value or "\r" in value:
+            raise ValueError("heading must be one non-NUL line")
+        return value
+
+
+class HeadingSkillMap(StrictEditPlanModel):
+    """Versioned compact map for title-section edits."""
+
+    schema_version: Literal["skill-map-v3"] = "skill-map-v3"
+    parser_policy_version: Literal["skill-map-policy-v3"] = "skill-map-policy-v3"
+    blocks: tuple[HeadingSkillBlock, ...] = Field(min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def validate_blocks(self) -> HeadingSkillMap:
+        seen: set[str] = set()
+        for block in self.blocks:
+            if block.block_id in seen:
+                raise ValueError("Skill map block IDs must be unique")
+            parent_id = block.block_id.rpartition(".")[0]
+            if parent_id and parent_id not in seen:
+                raise ValueError("heading block parent must precede its child")
+            seen.add(block.block_id)
+        return self
+
+
 class SkillTargetContract(StrictEditPlanModel):
     schema_version: Literal["skill-target-contract-v1"] = "skill-target-contract-v1"
     adapter_id: str = Field(min_length=1, max_length=128)
@@ -185,7 +228,6 @@ class ModelDefectCluster(StrictEditPlanModel):
     case_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
     evidence_refs: tuple[str, ...] = Field(min_length=1, max_length=128)
     block_ids: tuple[str, ...] = Field(default=(), max_length=32)
-    contract_fields: tuple[str, ...] = Field(default=(), max_length=16)
     missing_elements: tuple[str, ...] = Field(default=(), max_length=8)
     workflow_actions: tuple[str, ...] = Field(default=(), max_length=8)
 
@@ -223,17 +265,12 @@ class ModelDefectCluster(StrictEditPlanModel):
     def validate_block_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         if len(values) != len(set(values)):
             raise ValueError("block_ids must be unique")
-        if any(_BLOCK_ID_PATTERN.fullmatch(value) is None for value in values):
+        if any(
+            _BLOCK_ID_PATTERN.fullmatch(value) is None
+            and _HEADING_BLOCK_ID_PATTERN.fullmatch(value) is None
+            for value in values
+        ):
             raise ValueError("block_id has an invalid format")
-        return values
-
-    @field_validator("contract_fields")
-    @classmethod
-    def validate_contract_fields(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        if len(values) != len(set(values)):
-            raise ValueError("contract_fields must be unique")
-        if any(_CONTRACT_FIELD_PATTERN.fullmatch(value) is None for value in values):
-            raise ValueError("contract field has an invalid format")
         return values
 
     @field_validator("missing_elements", "workflow_actions")
@@ -242,33 +279,6 @@ class ModelDefectCluster(StrictEditPlanModel):
         if len(values) != len(set(values)):
             raise ValueError("behavior elements must be unique")
         return tuple(_validate_text(value) for value in values)
-
-    @model_validator(mode="after")
-    def validate_type_specific_evidence(self) -> ModelDefectCluster:
-        if self.primary_module in self.secondary_modules:
-            raise ValueError("primary_module must not be repeated as a secondary module")
-        if len(self.secondary_modules) != len(set(self.secondary_modules)):
-            raise ValueError("secondary_modules must be unique")
-        if self.defect_type == "incorrect_guidance" and (
-            not self.block_ids or not self.contract_fields
-        ):
-            raise ValueError("incorrect_guidance requires a Skill block and contract field")
-        if self.defect_type in {"contradiction", "redundancy", "priority_conflict"} and len(
-            self.block_ids
-        ) < 2:
-            raise ValueError(f"{self.defect_type} requires at least two Skill blocks")
-        if self.defect_type == "underspecified_guidance" and (
-            not self.block_ids or not self.missing_elements
-        ):
-            raise ValueError("underspecified_guidance requires a block and missing elements")
-        if self.defect_type == "workflow_order_issue" and len(self.workflow_actions) < 2:
-            raise ValueError("workflow_order_issue requires at least two workflow actions")
-        if self.defect_type == "missing_recovery_strategy" and not self.block_ids:
-            raise ValueError("missing_recovery_strategy requires a related Skill block")
-        if self.scope == "target_compatibility" and not self.contract_fields:
-            raise ValueError("target_compatibility requires a contract field")
-        return self
-
 
 class WorkflowRule(StrictEditPlanModel):
     rule_kind: Literal["workflow"]
@@ -401,6 +411,8 @@ class ModelSemanticEdit(StrictEditPlanModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> ModelSemanticEdit:
+        if self.operation == "reorder_workflow" and not isinstance(self.rule, WorkflowRule):
+            raise ValueError("reorder_workflow requires a workflow rule")
         if self.operation == "add_rule":
             if self.target_block_ids:
                 raise ValueError("add_rule must not include target_block_ids")
@@ -465,6 +477,16 @@ class EditPlanSource(StrictEditPlanModel):
 
 class DefectCluster(ModelDefectCluster):
     cluster_id: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_retired_contract_fields(cls, value: Any) -> Any:
+        """Read historical bound plans without retaining retired model-output metadata."""
+
+        if isinstance(value, dict) and "contract_fields" in value:
+            value = dict(value)
+            value.pop("contract_fields")
+        return value
 
     @field_validator("cluster_id")
     @classmethod
@@ -577,6 +599,210 @@ class SkillEditPlan(StrictEditPlanModel):
         return self
 
 
+BlockEditOperation = Literal["replace_block", "add_block"]
+
+
+def _validate_heading_block_id(value: str) -> str:
+    if _HEADING_BLOCK_ID_PATTERN.fullmatch(value) is None:
+        raise ValueError("heading block_id has an invalid format")
+    return value
+
+
+def _validate_markdown_fragment(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("replacement markdown must not contain NUL")
+    if "*** Begin Patch" in value or "diff --git " in value:
+        raise ValueError("replacement markdown must not contain a mechanical patch")
+    return value
+
+
+def _validate_block_edit_location(
+    operation: BlockEditOperation,
+    target_block_id: str | None,
+    parent_block_id: str | None,
+    after_block_id: str | None,
+    replacement_markdown: str | None,
+    new_block_markdown: str | None,
+) -> None:
+    if operation == "replace_block":
+        if target_block_id is None or replacement_markdown is None:
+            raise ValueError("replace_block requires target_block_id and replacement_markdown")
+        if any(
+            value is not None
+            for value in (parent_block_id, after_block_id, new_block_markdown)
+        ):
+            raise ValueError("replace_block must not include add_block fields")
+        return
+    if parent_block_id is None or new_block_markdown is None:
+        raise ValueError("add_block requires parent_block_id and new_block_markdown")
+    if target_block_id is not None or replacement_markdown is not None:
+        raise ValueError("add_block must not include replace_block fields")
+
+
+class ModelBlockEdit(StrictEditPlanModel):
+    """One v2 whole-section replacement or child-section addition."""
+
+    cluster_indices: tuple[int, ...] = Field(min_length=1, max_length=8)
+    operation: BlockEditOperation
+    primary_module: FunctionalModule
+    target_block_id: str | None = None
+    parent_block_id: str | None = None
+    after_block_id: str | None = None
+    replacement_markdown: str | None = None
+    new_block_markdown: str | None = None
+    intent: str = Field(min_length=1, max_length=2048)
+    behavior_assertion: BehaviorAssertion
+    generalization_scope: str = Field(min_length=1, max_length=1024)
+    regression_risk: str = Field(min_length=1, max_length=1024)
+    falsifiable_validation: str = Field(min_length=1, max_length=2048)
+
+    @field_validator("cluster_indices")
+    @classmethod
+    def validate_cluster_indices(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(value < 1 for value in values) or len(values) != len(set(values)):
+            raise ValueError("cluster_indices must contain unique positive values")
+        return values
+
+    @field_validator("target_block_id", "parent_block_id", "after_block_id")
+    @classmethod
+    def validate_block_ids(cls, value: str | None) -> str | None:
+        return _validate_heading_block_id(value) if value is not None else value
+
+    @field_validator("replacement_markdown", "new_block_markdown")
+    @classmethod
+    def validate_fragments(cls, value: str | None) -> str | None:
+        return _validate_markdown_fragment(value) if value is not None else value
+
+    @field_validator("intent", "generalization_scope", "regression_risk", "falsifiable_validation")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return _validate_text(value)
+
+    @model_validator(mode="after")
+    def validate_location(self) -> ModelBlockEdit:
+        _validate_block_edit_location(
+            self.operation,
+            self.target_block_id,
+            self.parent_block_id,
+            self.after_block_id,
+            self.replacement_markdown,
+            self.new_block_markdown,
+        )
+        return self
+
+
+class ModelEditPlanV2(StrictEditPlanModel):
+    schema_version: Literal["skill-edit-plan-model-v2"] = "skill-edit-plan-model-v2"
+    summary: str = Field(min_length=1, max_length=2048)
+    clusters: tuple[ModelDefectCluster, ...] = Field(min_length=1, max_length=8)
+    edits: tuple[ModelBlockEdit, ...] = Field(default=(), max_length=3)
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str) -> str:
+        return _validate_text(value)
+
+    @model_validator(mode="after")
+    def validate_cluster_indices(self) -> ModelEditPlanV2:
+        for edit in self.edits:
+            if any(index > len(self.clusters) for index in edit.cluster_indices):
+                raise ValueError("edit refers to an unknown cluster index")
+        return self
+
+
+class BlockEdit(StrictEditPlanModel):
+    """Bound v2 block edit with only model attribution metadata retained."""
+
+    edit_id: str
+    cluster_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+    operation: BlockEditOperation
+    primary_module: FunctionalModule
+    target_block_id: str | None = None
+    parent_block_id: str | None = None
+    after_block_id: str | None = None
+    replacement_markdown: str | None = None
+    new_block_markdown: str | None = None
+    intent: str = Field(min_length=1, max_length=2048)
+    behavior_assertion: BehaviorAssertion
+    generalization_scope: str = Field(min_length=1, max_length=1024)
+    regression_risk: str = Field(min_length=1, max_length=1024)
+    falsifiable_validation: str = Field(min_length=1, max_length=2048)
+
+    @field_validator("edit_id")
+    @classmethod
+    def validate_edit_id(cls, value: str) -> str:
+        if _LOCAL_ID_PATTERN.fullmatch(value) is None or not value.startswith("edit-"):
+            raise ValueError("edit_id has an invalid format")
+        return value
+
+    @field_validator("cluster_ids")
+    @classmethod
+    def validate_cluster_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("cluster_ids must be unique")
+        if any(
+            _LOCAL_ID_PATTERN.fullmatch(value) is None or not value.startswith("cluster-")
+            for value in values
+        ):
+            raise ValueError("cluster_id has an invalid format")
+        return values
+
+    @field_validator("target_block_id", "parent_block_id", "after_block_id")
+    @classmethod
+    def validate_block_ids(cls, value: str | None) -> str | None:
+        return _validate_heading_block_id(value) if value is not None else value
+
+    @field_validator("replacement_markdown", "new_block_markdown")
+    @classmethod
+    def validate_fragments(cls, value: str | None) -> str | None:
+        return _validate_markdown_fragment(value) if value is not None else value
+
+    @field_validator("intent", "generalization_scope", "regression_risk", "falsifiable_validation")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        return _validate_text(value)
+
+    @model_validator(mode="after")
+    def validate_location(self) -> BlockEdit:
+        _validate_block_edit_location(
+            self.operation,
+            self.target_block_id,
+            self.parent_block_id,
+            self.after_block_id,
+            self.replacement_markdown,
+            self.new_block_markdown,
+        )
+        return self
+
+
+class SkillEditPlanV2(StrictEditPlanModel):
+    schema_version: Literal["skill-edit-plan-v2"] = "skill-edit-plan-v2"
+    status: Literal["proposed", "findings_only"]
+    source: EditPlanSource
+    summary: str = Field(min_length=1, max_length=2048)
+    clusters: tuple[DefectCluster, ...] = Field(min_length=1, max_length=8)
+    edits: tuple[BlockEdit, ...] = Field(default=(), max_length=3)
+    model_output_untrusted: Literal[True] = True
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str) -> str:
+        return _validate_text(value)
+
+    @model_validator(mode="after")
+    def validate_local_bindings(self) -> SkillEditPlanV2:
+        cluster_ids = {cluster.cluster_id for cluster in self.clusters}
+        if len(cluster_ids) != len(self.clusters):
+            raise ValueError("cluster IDs must be unique")
+        edit_ids = {edit.edit_id for edit in self.edits}
+        if len(edit_ids) != len(self.edits):
+            raise ValueError("edit IDs must be unique")
+        for edit in self.edits:
+            if not set(edit.cluster_ids).issubset(cluster_ids):
+                raise ValueError("edit refers to an unknown cluster ID")
+        return self
+
+
 class EditPlanReceipt(StrictEditPlanModel):
     schema_version: Literal["skill-edit-plan-receipt-v1"] = "skill-edit-plan-receipt-v1"
     status: EditPlanStatus
@@ -588,7 +814,8 @@ class EditPlanReceipt(StrictEditPlanModel):
         "skill-edit-plan-prompt-v2",
         "skill-edit-plan-prompt-v3",
         "skill-edit-plan-prompt-v4",
-    ] = "skill-edit-plan-prompt-v4"
+        "skill-edit-plan-prompt-v5",
+    ] = "skill-edit-plan-prompt-v5"
     source: EditPlanSource | None = None
     plan_sha256: str | None = None
     skill_map_sha256: str | None = None

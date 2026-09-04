@@ -28,7 +28,7 @@
 | `add_rule` | 必须为空 | 必须恰好一个非 locked block |
 | `clarify_rule`、`correct_rule`、`remove_rule`、`set_precedence`、`generalize_rule` | 必须恰好一个 block | 必须为空 |
 | `merge_rules` | 两个或以上连续 block | 必须为空 |
-| `reorder_workflow` | 保持不可渲染并 fail closed | 必须为空 |
+| `reorder_workflow` | 必须恰好一个 workflow block；以 rule 文本替换整个 block | 必须为空 |
 
 计划模型必须先形成跨 case cluster，再按不重叠的文本位置形成 edit：多个 cluster 的兼容修复落到同一位置时，归入同一 edit 的 `cluster_indices`；同一 cluster 的修复落到不同位置时，可由多个 edit 引用该 cluster。
 
@@ -44,8 +44,8 @@
 
 1. 只有模型响应合同（`ModelSemanticEdit`）强制上述新组合；已持久化的 bound EditPlan 不做破坏性迁移。
 2. binder 继续把 target 和 anchor 都作为 edit 占用位置，并拒绝跨 edit 重叠。
-3. 每个 edit 必须仍可追溯到其引用 cluster 的至少一个 block；cluster 与 edit 的多对多关联不得绕过 evidence、permission、hash 或敏感文本边界。
-4. 输出仍严格拒绝未知字段、无效 block、locked block、错误 evidence、操作与缺陷类型不匹配的组合。
+3. cluster 与 edit 的多对多关联仅验证 `cluster_indices` / bound `cluster_ids` 指向已有 cluster；cluster 是模型归因，不参与 edit 的 evidence、module、block 或 location 校验。
+4. 输出仍严格拒绝未知字段、无效 edit location、locked block 与敏感文本；cluster 仅描述问题与证据，edit operation 不再按 cluster 的 defect type 限制；target contract 仅作为模型输入上下文，不要求或允许 cluster 输出 `contract_fields`。
 5. 不记录或输出 GT、Gold、凭据、held-out identity、私有路径、原始 session 或完整 Skill。
 
 ## 5. 验收标准
@@ -53,7 +53,7 @@
 1. `add_rule` 同时含 target 与 placement、或缺少 placement 时，在模型响应 schema 层被拒绝。
 2. 改写类操作含 placement、缺少 target、或 target 数量不符合操作要求时，在模型响应 schema 层被拒绝。
 3. 新 prompt 明确要求“cluster 按问题、edit 按不可重叠变更位置”，并要求共同落点的兼容 cluster 合并到一个 edit。
-4. 一个 edit 可引用多个 cluster；一个 cluster 可被多个位置互不重叠的 edit 引用，且 binder 的 evidence、module、permission 与 traceability 校验保持有效。
+4. 一个 edit 可引用多个 cluster；一个 cluster 可被多个位置互不重叠的 edit 引用。cluster 到 edit 的反向关系由全部 edit 引用推导，binder 不再将 cluster 的 evidence、module 或 block 用作 edit 校验条件。
 5. 两个 edit 复用任一 target 或 placement anchor 时仍 fail closed；错误信息能表明重叠位置。
 6. 历史 bound plan 中 `add_rule` 使用 target fallback 的 renderer 测试继续通过。
 7. 只运行相关单元测试、ruff、mypy 与 `git diff --check`；不运行完整测试或任何真实服务。

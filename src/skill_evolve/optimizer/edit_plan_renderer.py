@@ -8,18 +8,26 @@ import re
 from dataclasses import dataclass
 
 from skill_evolve.optimizer.edit_plan_contracts import (
+    BlockEdit,
     ConstraintRule,
     HeuristicRule,
     RecoveryRule,
     SemanticEdit,
     SkillBlock,
     SkillEditPlan,
+    SkillEditPlanV2,
     WorkflowRule,
 )
-from skill_evolve.optimizer.skill_map import build_skill_map
+from skill_evolve.optimizer.skill_map import (
+    ParsedHeadingBlock,
+    build_legacy_skill_map,
+    build_skill_map,
+    parse_heading_blocks,
+)
 from skill_evolve.trajectory.compressor import canonical_json_bytes
 
-RENDER_POLICY_VERSION = "skill-edit-render-policy-v1"
+RENDER_POLICY_VERSION = "skill-edit-render-policy-v3"
+_LEGACY_RENDER_POLICY_VERSION = "skill-edit-render-policy-v2"
 _HUNK_PATTERN = re.compile(
     r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
     r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
@@ -27,6 +35,8 @@ _HUNK_PATTERN = re.compile(
 _PRIVATE_PATH_PATTERN = re.compile(r"(?i)(?:[a-z]:[\\/]|/(?:home|users|tmp|var|etc)(?:/|\b))")
 _SECRET_PATTERN = re.compile(r"(?i)(?:api[_-]?key|secret|password)\s*[:=]")
 _SUPPORTED_TARGET_TYPES = frozenset({"paragraph", "list"})
+_SECTION_HEADING_PATTERN = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_FENCE_PATTERN = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 
 
 class EditPlanRenderError(ValueError):
@@ -38,6 +48,7 @@ class RenderedSkill:
     child_bytes: bytes
     patch_bytes: bytes
     changed_edit_ids: tuple[str, ...]
+    render_policy_version: str
 
 
 @dataclass(frozen=True)
@@ -48,9 +59,65 @@ class _Replacement:
     edit_id: str
 
 
-def render_edit_plan(parent_bytes: bytes, plan: SkillEditPlan) -> RenderedSkill:
+def render_edit_plan(parent_bytes: bytes, plan: SkillEditPlan | SkillEditPlanV2) -> RenderedSkill:
     """Render one source-bound plan without consulting a model or external state."""
 
+    if isinstance(plan, SkillEditPlanV2):
+        return _render_v2_edit_plan(parent_bytes, plan)
+    return _render_legacy_edit_plan(parent_bytes, plan)
+
+
+def _render_legacy_edit_plan(parent_bytes: bytes, plan: SkillEditPlan) -> RenderedSkill:
+    """Render persisted v1 plans with the retired v2 paragraph/list map."""
+
+    if plan.source.parent_skill_sha256 != _sha256(parent_bytes):
+        raise EditPlanRenderError("parent Skill hash does not match the edit plan")
+    try:
+        parent_text = parent_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise EditPlanRenderError("parent Skill must be UTF-8") from error
+    if "\x00" in parent_text:
+        raise EditPlanRenderError("parent Skill must not contain NUL")
+
+    skill_map = build_legacy_skill_map(parent_bytes)
+    if plan.source.skill_map_sha256 != _sha256(
+        canonical_json_bytes(skill_map.model_dump(mode="json"))
+    ):
+        raise EditPlanRenderError("Skill map hash does not match the edit plan")
+    blocks = {block.block_id: block for block in skill_map.blocks}
+    offsets = _line_offsets(parent_text)
+    replacements: list[_Replacement] = []
+    for edit in plan.edits:
+        replacements.extend(_replacements_for_edit(edit, parent_text, blocks, offsets))
+    _validate_replacements(replacements)
+
+    child_text = parent_text
+    for replacement in sorted(replacements, key=lambda value: value.start, reverse=True):
+        child_text = (
+            child_text[: replacement.start]
+            + replacement.text
+            + child_text[replacement.end :]
+        )
+    child_bytes = child_text.encode("utf-8")
+    _validate_child_text(child_text)
+    try:
+        build_legacy_skill_map(child_bytes)
+    except ValueError as error:
+        raise EditPlanRenderError("rendered Skill is not structurally valid") from error
+    patch_bytes = _unified_diff(parent_text, child_text)
+    if not patch_bytes:
+        raise EditPlanRenderError("semantic edits produced an empty patch")
+    if apply_unified_diff(parent_bytes, patch_bytes) != child_bytes:
+        raise EditPlanRenderError("rendered patch does not reproduce the child Skill")
+    return RenderedSkill(
+        child_bytes=child_bytes,
+        patch_bytes=patch_bytes,
+        changed_edit_ids=tuple(edit.edit_id for edit in plan.edits),
+        render_policy_version=_LEGACY_RENDER_POLICY_VERSION,
+    )
+
+
+def _render_v2_edit_plan(parent_bytes: bytes, plan: SkillEditPlanV2) -> RenderedSkill:
     if plan.source.parent_skill_sha256 != _sha256(parent_bytes):
         raise EditPlanRenderError("parent Skill hash does not match the edit plan")
     try:
@@ -65,11 +132,8 @@ def render_edit_plan(parent_bytes: bytes, plan: SkillEditPlan) -> RenderedSkill:
         canonical_json_bytes(skill_map.model_dump(mode="json"))
     ):
         raise EditPlanRenderError("Skill map hash does not match the edit plan")
-    blocks = {block.block_id: block for block in skill_map.blocks}
-    offsets = _line_offsets(parent_text)
-    replacements: list[_Replacement] = []
-    for edit in plan.edits:
-        replacements.extend(_replacements_for_edit(edit, parent_text, blocks, offsets))
+    sections = {section.block.block_id: section for section in parse_heading_blocks(parent_bytes)}
+    replacements = _v2_replacements(plan.edits, parent_text, sections)
     _validate_replacements(replacements)
 
     child_text = parent_text
@@ -94,7 +158,123 @@ def render_edit_plan(parent_bytes: bytes, plan: SkillEditPlan) -> RenderedSkill:
         child_bytes=child_bytes,
         patch_bytes=patch_bytes,
         changed_edit_ids=tuple(edit.edit_id for edit in plan.edits),
+        render_policy_version=RENDER_POLICY_VERSION,
     )
+
+
+def _v2_replacements(
+    edits: tuple[BlockEdit, ...],
+    parent_text: str,
+    sections: dict[str, ParsedHeadingBlock],
+) -> list[_Replacement]:
+    scopes: list[str] = []
+    replacements: list[_Replacement] = []
+    newline = "\r\n" if "\r\n" in parent_text else "\n"
+    for edit in edits:
+        if edit.operation == "replace_block":
+            target_id = edit.target_block_id
+            fragment = edit.replacement_markdown
+            if target_id is None or fragment is None:
+                raise EditPlanRenderError("replace_block is incomplete")
+            target = sections.get(target_id)
+            if target is None:
+                raise EditPlanRenderError("edit refers to an unknown Skill block")
+            _validate_v2_scope(target_id, sections, scopes)
+            _validate_v2_fragment(fragment, target.block.heading_level)
+            replacements.append(
+                _Replacement(
+                    target.start,
+                    target.end,
+                    _normalise_fragment(fragment, newline),
+                    edit.edit_id,
+                )
+            )
+            scopes.append(target_id)
+            continue
+
+        parent_id = edit.parent_block_id
+        fragment = edit.new_block_markdown
+        if parent_id is None or fragment is None:
+            raise EditPlanRenderError("add_block is incomplete")
+        parent = sections.get(parent_id)
+        if parent is None:
+            raise EditPlanRenderError("edit refers to an unknown Skill block")
+        new_level = parent.block.heading_level + 1
+        if new_level > 6:
+            raise EditPlanRenderError("cannot add a child beneath a level-six heading")
+        after = sections.get(edit.after_block_id) if edit.after_block_id is not None else None
+        if edit.after_block_id is not None and (after is None or after.parent_id != parent_id):
+            raise EditPlanRenderError("after_block_id must be a direct child of parent_block_id")
+        _validate_v2_scope(parent_id, sections, scopes)
+        _validate_v2_fragment(fragment, new_level)
+        insertion = after.end if after is not None else parent.end
+        prefix = "" if insertion == 0 or parent_text[insertion - 1] in "\r\n" else newline
+        replacements.append(
+            _Replacement(
+                insertion,
+                insertion,
+                prefix + _normalise_fragment(fragment, newline),
+                edit.edit_id,
+            )
+        )
+        scopes.append(parent_id)
+    return replacements
+
+
+def _validate_v2_scope(
+    scope: str,
+    sections: dict[str, ParsedHeadingBlock],
+    scopes: list[str],
+) -> None:
+    if any(_block_paths_overlap(scope, existing) for existing in scopes):
+        raise EditPlanRenderError("rendered edit ranges overlap")
+    if any(
+        section.block.permission == "locked" and _block_paths_overlap(scope, block_id)
+        for block_id, section in sections.items()
+    ):
+        raise EditPlanRenderError("locked Skill blocks cannot be rendered")
+
+
+def _block_paths_overlap(left: str, right: str) -> bool:
+    return left == right or left.startswith(f"{right}.") or right.startswith(f"{left}.")
+
+
+def _validate_v2_fragment(fragment: str, expected_level: int) -> None:
+    first_heading_seen = False
+    marker: str | None = None
+    for line in fragment.splitlines():
+        stripped = line.strip()
+        if marker is not None:
+            if _is_fence_closing(stripped, marker):
+                marker = None
+            continue
+        heading = _SECTION_HEADING_PATTERN.fullmatch(stripped)
+        if not first_heading_seen:
+            if not stripped:
+                continue
+            if heading is None or len(heading.group(1)) != expected_level:
+                raise EditPlanRenderError(
+                    "section fragment must begin with the expected heading level"
+                )
+            first_heading_seen = True
+            continue
+        fence = _FENCE_PATTERN.match(stripped)
+        if fence is not None:
+            marker = fence.group(1)
+            continue
+        if heading is not None and len(heading.group(1)) <= expected_level:
+            raise EditPlanRenderError("section fragment exceeds its target heading boundary")
+    if not first_heading_seen:
+        raise EditPlanRenderError("section fragment must contain a heading")
+
+
+def _is_fence_closing(line: str, marker: str) -> bool:
+    return bool(re.fullmatch(rf"{re.escape(marker[0])}{{{len(marker)},}}", line))
+
+
+def _normalise_fragment(fragment: str, newline: str) -> str:
+    normalized = fragment.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline)
+    return normalized if normalized.endswith(newline) else f"{normalized}{newline}"
 
 
 def apply_unified_diff(parent_bytes: bytes, patch_bytes: bytes) -> bytes:
@@ -194,7 +374,11 @@ def _replacements_for_edit(
                 raise EditPlanRenderError("merge_rules targets must be contiguous")
         return [_Replacement(start, end, rule_text, edit.edit_id)]
     if edit.operation == "reorder_workflow":
-        raise EditPlanRenderError("reorder_workflow is not renderable by policy v1")
+        if not isinstance(edit.rule, WorkflowRule):
+            raise EditPlanRenderError("reorder_workflow requires a workflow rule")
+        if len(target_blocks) != 1 or anchor is not None:
+            raise EditPlanRenderError("reorder_workflow requires exactly one target block")
+        return [_Replacement(*_block_span(target_blocks[0], offsets), rule_text, edit.edit_id)]
     if len(target_blocks) != 1 or anchor is not None:
         raise EditPlanRenderError(f"{edit.operation} requires exactly one target block")
     return [_Replacement(*_block_span(target_blocks[0], offsets), rule_text, edit.edit_id)]

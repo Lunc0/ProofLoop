@@ -20,10 +20,10 @@ from skill_evolve.candidate.contracts import split_candidate_id
 from skill_evolve.candidate.store import CandidateStoreError
 from skill_evolve.optimizer.edit_plan_contracts import (
     SkillEditPlan,
+    SkillEditPlanV2,
     normalise_historical_edit_plan_status,
 )
 from skill_evolve.optimizer.edit_plan_renderer import (
-    RENDER_POLICY_VERSION,
     EditPlanRenderError,
     render_edit_plan,
 )
@@ -90,7 +90,7 @@ def materialize_after_evolution(
                     edit_plan_sha256=source.edit_plan_sha256,
                     patch_sha256=patch_sha256,
                     parent_skill_sha256=plan.source.parent_skill_sha256,
-                    render_policy_version=RENDER_POLICY_VERSION,
+                    render_policy_version=rendered.render_policy_version,
                 ),
             )
     except (OSError, ValueError, CandidateStoreError) as error:
@@ -161,7 +161,9 @@ def _source_for_plan(
     return source
 
 
-def _normalise_plan(raw_plan: dict[str, object]) -> SkillEditPlan:
+def _normalise_plan(raw_plan: dict[str, object]) -> SkillEditPlan | SkillEditPlanV2:
+    if raw_plan.get("schema_version") == "skill-edit-plan-v2":
+        return SkillEditPlanV2.model_validate(raw_plan)
     normalised = dict(raw_plan)
     normalised["status"] = normalise_historical_edit_plan_status(normalised.get("status"))
     return SkillEditPlan.model_validate(normalised)

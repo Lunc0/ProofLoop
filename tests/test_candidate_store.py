@@ -59,7 +59,7 @@ def test_store_creates_immutable_baseline_child_and_local_selection(tmp_path: Pa
             encoding="utf-8"
         )
     )
-    assert skill_map["schema_version"] == "skill-map-v2"
+    assert skill_map["schema_version"] == "skill-map-v3"
     assert "skill_sha256" not in skill_map
     assert not (root / "candidates" / "sql-analyst" / "000-baseline" / "NOTICE.md").exists()
 
@@ -141,7 +141,7 @@ def test_store_rejects_missing_or_mismatched_skill_map_and_backfills_explicitly(
     backfilled = service.backfill_skill_map(candidate.candidate_id)
     assert backfilled.candidate_id == candidate.candidate_id
     skill_map = json.loads(map_path.read_text(encoding="utf-8"))
-    assert skill_map["schema_version"] == "skill-map-v2"
+    assert skill_map["schema_version"] == "skill-map-v3"
     with pytest.raises(CandidateStoreError, match="already exists"):
         service.backfill_skill_map(candidate.candidate_id)
 
@@ -172,17 +172,23 @@ def test_store_rebuilds_an_existing_legacy_skill_map_explicitly(tmp_path: Path) 
     rebuilt = service.rebuild_skill_map(candidate.candidate_id)
 
     assert rebuilt.candidate_id == candidate.candidate_id
-    assert json.loads(map_path.read_text(encoding="utf-8"))["schema_version"] == "skill-map-v2"
+    assert json.loads(map_path.read_text(encoding="utf-8"))["schema_version"] == "skill-map-v3"
 
 
-def test_store_persists_optimizer_provenance_for_a_draft_child(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "render_policy_version",
+    ("skill-edit-render-policy-v1", "skill-edit-render-policy-v2"),
+)
+def test_store_persists_optimizer_provenance_for_a_draft_child(
+    tmp_path: Path, render_policy_version: str
+) -> None:
     service = _service(tmp_path)
     baseline = service.initialise("sql-analyst", _write_skill(tmp_path / "sources" / "base.md"))
     provenance = OptimizerProvenance(
         edit_plan_sha256="a" * 64,
         patch_sha256="b" * 64,
         parent_skill_sha256=baseline.metadata.skill_sha256,
-        render_policy_version="skill-edit-render-policy-v1",
+        render_policy_version=render_policy_version,
     )
     child = service.import_candidate(
         "sql-analyst",

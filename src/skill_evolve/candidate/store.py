@@ -20,7 +20,7 @@ from skill_evolve.candidate.contracts import (
     split_candidate_id,
     validate_skill_id,
 )
-from skill_evolve.optimizer.skill_map import build_skill_map
+from skill_evolve.optimizer.skill_map import build_legacy_skill_map, build_skill_map
 from skill_evolve.trajectory.compressor import canonical_json_bytes
 
 MAX_SKILL_BYTES = 512 * 1024
@@ -424,9 +424,17 @@ def _skill_map_bytes(skill_bytes: bytes) -> bytes:
     return canonical_json_bytes(skill_map.model_dump(mode="json")) + b"\n"
 
 
+def _legacy_skill_map_bytes(skill_bytes: bytes) -> bytes:
+    try:
+        skill_map = build_legacy_skill_map(skill_bytes, max_input_bytes=MAX_SKILL_BYTES)
+    except ValueError as error:
+        raise CandidateStoreError(f"could not build legacy candidate skill-map: {error}") from error
+    return canonical_json_bytes(skill_map.model_dump(mode="json")) + b"\n"
+
+
 def _validate_skill_map(map_path: Path, skill_bytes: bytes, candidate_id: str) -> None:
     map_bytes = _read_text_file(map_path, MAX_SKILL_MAP_BYTES, "candidate skill-map.json")
-    if map_bytes != _skill_map_bytes(skill_bytes):
+    if map_bytes not in {_skill_map_bytes(skill_bytes), _legacy_skill_map_bytes(skill_bytes)}:
         raise CandidateStoreError("candidate skill-map does not match candidate SKILL.md")
 
 
