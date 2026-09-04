@@ -14,8 +14,6 @@ from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.optimizer.client import OptimizerClientResponse
 from skill_evolve.optimizer.contracts import ProviderUsage
 
-_DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
-
 
 class MissingOptimizerApiKeyError(RuntimeError):
     """The configured non-secret key reference could not be resolved."""
@@ -63,7 +61,7 @@ class DeepSeekChatClient:
         if config.max_output_tokens is not None:
             body["max_tokens"] = config.max_output_tokens
         request = Request(
-            _DEEPSEEK_CHAT_COMPLETIONS_URL,
+            _chat_completions_url(config.base_url),
             data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
@@ -105,6 +103,10 @@ def _default_dotenv_path(environ: Mapping[str, str] | None) -> Path | None:
     if environ is not None:
         return None
     return Path.cwd() / ".env"
+
+
+def _chat_completions_url(base_url: str) -> str:
+    return f"{base_url}/chat/completions"
 
 
 def _open_request(request: Request, timeout_seconds: float) -> tuple[int, bytes]:

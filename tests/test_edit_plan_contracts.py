@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from skill_evolve.optimizer.edit_plan_contracts import (
     BehaviorAssertion,
+    EditPlanReceipt,
     ModelDefectCluster,
     ModelEditPlan,
     ModelSemanticEdit,
@@ -49,6 +50,71 @@ def test_model_plan_limits_edits_and_rejects_unknown_cluster_indices() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("operation", "target_block_ids", "placement_after_block_id", "error"),
+    [
+        ("add_rule", (_BLOCK_1,), None, "add_rule must not include target_block_ids"),
+        ("add_rule", (), None, "add_rule requires placement_after_block_id"),
+        (
+            "clarify_rule",
+            (_BLOCK_1,),
+            _BLOCK_2,
+            "clarify_rule must not include placement_after_block_id",
+        ),
+        (
+            "clarify_rule",
+            (),
+            None,
+            "clarify_rule requires exactly one target_block_id",
+        ),
+        (
+            "merge_rules",
+            (_BLOCK_1,),
+            None,
+            "merge_rules requires at least two target_block_ids",
+        ),
+    ],
+)
+def test_model_edit_requires_operation_specific_location_shape(
+    operation: str,
+    target_block_ids: tuple[str, ...],
+    placement_after_block_id: str | None,
+    error: str,
+) -> None:
+    payload = _edit(1).model_dump(mode="json")
+    payload.update(
+        operation=operation,
+        target_block_ids=target_block_ids,
+        placement_after_block_id=placement_after_block_id,
+    )
+
+    with pytest.raises(ValidationError, match=error):
+        ModelSemanticEdit.model_validate(payload)
+
+
+def test_model_edit_accepts_operation_specific_location_shapes() -> None:
+    add_rule = _edit(1)
+    clarify_payload = _edit(1).model_dump(mode="json")
+    clarify_payload.update(
+        operation="clarify_rule",
+        target_block_ids=(_BLOCK_1,),
+        placement_after_block_id=None,
+    )
+    merge_payload = _edit(1).model_dump(mode="json")
+    merge_payload.update(
+        operation="merge_rules",
+        target_block_ids=(_BLOCK_1, _BLOCK_2),
+        placement_after_block_id=None,
+    )
+
+    assert add_rule.placement_after_block_id == _BLOCK_1
+    assert ModelSemanticEdit.model_validate(clarify_payload).target_block_ids == (_BLOCK_1,)
+    assert ModelSemanticEdit.model_validate(merge_payload).target_block_ids == (
+        _BLOCK_1,
+        _BLOCK_2,
+    )
+
+
 def test_semantic_text_rejects_patch_and_full_skill() -> None:
     with pytest.raises(ValidationError, match="mechanical patch"):
         _edit(1, intent="*** Begin Patch\nreplace everything")
@@ -61,6 +127,38 @@ def test_historical_guarded_status_normalises_but_unknown_status_is_rejected() -
     assert normalise_historical_edit_plan_status("findings_only") == "findings_only"
     with pytest.raises(ValueError, match="not materializable"):
         normalise_historical_edit_plan_status("unknown")
+
+
+def test_receipt_keeps_prior_prompts_readable_and_defaults_new_plans_to_v3() -> None:
+    historical_v1 = EditPlanReceipt(
+        status="unavailable",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        prompt_version="skill-edit-plan-prompt-v1",
+    )
+    historical_v2 = EditPlanReceipt(
+        status="unavailable",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        prompt_version="skill-edit-plan-prompt-v2",
+    )
+    historical_v3 = EditPlanReceipt(
+        status="unavailable",
+        provider="deepseek",
+        model="deepseek-v4-flash-0731",
+        prompt_version="skill-edit-plan-prompt-v3",
+    )
+    current = EditPlanReceipt(
+        status="unavailable",
+        provider="deepseek",
+        model="deepseek-v4-flash-0731",
+    )
+
+    assert historical_v1.prompt_version == "skill-edit-plan-prompt-v1"
+    assert historical_v2.prompt_version == "skill-edit-plan-prompt-v2"
+    assert historical_v3.prompt_version == "skill-edit-plan-prompt-v3"
+    assert current.model == "deepseek-v4-flash-0731"
+    assert current.prompt_version == "skill-edit-plan-prompt-v4"
 
 
 def _cluster(

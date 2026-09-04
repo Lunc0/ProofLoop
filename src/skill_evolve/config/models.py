@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+OPTIMIZER_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
 class StrictModel(BaseModel):
@@ -111,7 +113,8 @@ class OptimizerConfig(StrictModel):
 
     enabled: bool = False
     provider: Literal["deepseek"] = "deepseek"
-    model: Literal["deepseek-v4-flash"] = "deepseek-v4-flash"
+    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-v4-flash"
     api_key_env: Literal["DEEPSEEK_API_KEY"] = "DEEPSEEK_API_KEY"
     timeout_ms: int = Field(default=30_000, ge=1_000, le=300_000)
     max_output_tokens: int | None = Field(default=None, ge=64)
@@ -119,6 +122,31 @@ class OptimizerConfig(StrictModel):
     prompt_version: Literal["skill-optimization-advice-prompt-v1"] = (
         "skill-optimization-advice-prompt-v1"
     )
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("optimizer.base_url must be an HTTPS origin or base path")
+        path_parts = tuple(part for part in parsed.path.split("/") if part)
+        if any(part in {".", ".."} for part in path_parts):
+            raise ValueError("optimizer.base_url must not contain relative path segments")
+        return urlunsplit(("https", parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if OPTIMIZER_MODEL_PATTERN.fullmatch(value) is None:
+            raise ValueError("optimizer.model must be a safe provider model identifier")
+        return value
 
 
 class EnvironmentConfig(StrictModel):

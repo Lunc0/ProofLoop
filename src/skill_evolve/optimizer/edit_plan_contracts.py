@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from skill_evolve.optimizer.contracts import ProviderUsage
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _BLOCK_ID_PATTERN = re.compile(r"^b(?:0[1-9]|[1-9][0-9]*)$")
 _LOCAL_REF_PATTERN = re.compile(r"^(?:case|evidence)-[0-9]{3}(?:-[0-9]{3})?-[0-9a-f]{12}$")
 _LOCAL_ID_PATTERN = re.compile(r"^(?:cluster|edit)-[0-9]{3}$")
@@ -400,13 +401,20 @@ class ModelSemanticEdit(StrictEditPlanModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> ModelSemanticEdit:
-        if not self.target_block_ids and self.placement_after_block_id is None:
-            raise ValueError("an edit requires a target block or placement anchor")
-        if (
-            self.placement_after_block_id is not None
-            and self.placement_after_block_id in self.target_block_ids
-        ):
-            raise ValueError("placement anchor must not duplicate a target block")
+        if self.operation == "add_rule":
+            if self.target_block_ids:
+                raise ValueError("add_rule must not include target_block_ids")
+            if self.placement_after_block_id is None:
+                raise ValueError("add_rule requires placement_after_block_id")
+            return self
+        if self.placement_after_block_id is not None:
+            raise ValueError(f"{self.operation} must not include placement_after_block_id")
+        if self.operation == "merge_rules":
+            if len(self.target_block_ids) < 2:
+                raise ValueError("merge_rules requires at least two target_block_ids")
+            return self
+        if len(self.target_block_ids) != 1:
+            raise ValueError(f"{self.operation} requires exactly one target_block_id")
         return self
 
 
@@ -573,8 +581,14 @@ class EditPlanReceipt(StrictEditPlanModel):
     schema_version: Literal["skill-edit-plan-receipt-v1"] = "skill-edit-plan-receipt-v1"
     status: EditPlanStatus
     provider: Literal["deepseek"]
-    model: Literal["deepseek-v4-flash"]
-    prompt_version: Literal["skill-edit-plan-prompt-v1"] = "skill-edit-plan-prompt-v1"
+    model: str
+    base_url: str = "https://api.deepseek.com"
+    prompt_version: Literal[
+        "skill-edit-plan-prompt-v1",
+        "skill-edit-plan-prompt-v2",
+        "skill-edit-plan-prompt-v3",
+        "skill-edit-plan-prompt-v4",
+    ] = "skill-edit-plan-prompt-v4"
     source: EditPlanSource | None = None
     plan_sha256: str | None = None
     skill_map_sha256: str | None = None
@@ -582,6 +596,13 @@ class EditPlanReceipt(StrictEditPlanModel):
     edit_count: int = Field(default=0, ge=0, le=3)
     usage: ProviderUsage | None = None
     error_code: EditPlanErrorCode | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if _MODEL_NAME_PATTERN.fullmatch(value) is None:
+            raise ValueError("model must be a safe provider model identifier")
+        return value
 
     @field_validator("plan_sha256", "skill_map_sha256")
     @classmethod

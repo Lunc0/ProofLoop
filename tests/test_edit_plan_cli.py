@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from skill_evolve.benchmark import LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID
 from skill_evolve.cli import app
+from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.optimizer.edit_plan_contracts import (
     EditPlanReceipt,
     EditPlanResult,
@@ -24,17 +25,18 @@ def test_plan_command_uses_existing_evolution_run_without_rerunning(
 ) -> None:
     run = _write_completed_evolution_run(tmp_path / "runs")
     calls: list[tuple[str, str, str]] = []
+    received_optimizers: list[OptimizerConfig] = []
 
     def fake_plan(
         received_run: RunDirectory,
         subject: RunSubject,
-        optimizer: object,
+        optimizer: OptimizerConfig,
         *,
         run_status: str,
         adapter_id: str,
     ) -> EditPlanResult:
-        del optimizer
         calls.append((received_run.run_id, run_status, adapter_id))
+        received_optimizers.append(optimizer)
         assert subject.content == b"PRIVATE SKILL CONTENT\n"
         source = EditPlanSource(
             run_id=received_run.run_id,
@@ -60,6 +62,13 @@ def test_plan_command_uses_existing_evolution_run_without_rerunning(
         )
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_CHAT_MODEL", raising=False)
+    (tmp_path / ".env").write_text(
+        "DEEPSEEK_BASE_URL=https://www.micuapi.ai/v1\n"
+        "DEEPSEEK_CHAT_MODEL=deepseek-v4-flash-0731\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr("skill_evolve.cli.plan_after_evolution", fake_plan)
 
     result = CliRunner().invoke(app, ["optimizer", "plan", run.run_id])
@@ -67,6 +76,13 @@ def test_plan_command_uses_existing_evolution_run_without_rerunning(
     assert result.exit_code == 0
     assert calls == [
         (run.run_id, "task_failure", LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID)
+    ]
+    assert received_optimizers == [
+        OptimizerConfig(
+            enabled=True,
+            base_url="https://www.micuapi.ai/v1",
+            model="deepseek-v4-flash-0731",
+        )
     ]
     assert "PRIVATE SKILL CONTENT" not in result.stdout
     payload = json.loads(result.stdout)
@@ -77,7 +93,7 @@ def test_plan_command_uses_existing_evolution_run_without_rerunning(
         "skill_map_path": "optimizer/edit-plan/skill-map.json",
         "provider": "deepseek",
         "model": "deepseek-v4-flash",
-        "prompt_version": "skill-edit-plan-prompt-v1",
+        "prompt_version": "skill-edit-plan-prompt-v4",
         "plan_sha256": "d" * 64,
         "skill_map_sha256": "c" * 64,
         "cluster_count": 2,

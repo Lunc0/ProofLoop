@@ -28,3 +28,4 @@
 | 19 | v0.17 | 已完成 | [Optimizer 无应用层输出上限](19-v0.17-unbounded-optimizer-output.md) | [实施计划](../plans/19-v0.17-unbounded-optimizer-output.md) | [实现记录](../design/19-v0.17-unbounded-optimizer-output.md) |
 | 20 | v0.18 | 已完成 | [候选内置 SkillMap](20-v0.18-candidate-owned-skill-map.md) | [实施计划](../plans/20-v0.18-candidate-owned-skill-map.md) | [实现记录](../design/20-v0.18-candidate-owned-skill-map.md) |
 | 21 | v0.19 | 已完成 | [紧凑 SkillMap 与短编辑锚点](21-v0.19-compact-skill-map.md) | [实施计划](../plans/21-v0.19-compact-skill-map.md) | [实现记录](../design/21-v0.19-compact-skill-map.md) |
+| 22 | v0.20 | 已完成 | [EditPlan 位置语义与问题-变更分层](22-next-edit-plan-location-semantics.md) | [实施计划](../plans/22-v0.20-edit-plan-location-semantics.md) | [实现记录](../design/22-v0.20-edit-plan-location-semantics.md) |

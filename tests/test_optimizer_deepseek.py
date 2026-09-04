@@ -66,6 +66,30 @@ def test_request_is_one_json_completion_without_tools() -> None:
     assert "tools" not in body
 
 
+def test_request_uses_configured_openai_compatible_base_url_and_model() -> None:
+    requests: list[Request] = []
+
+    def opener(request: Request, timeout: float) -> tuple[int, bytes]:
+        del timeout
+        requests.append(request)
+        return 200, b'{"choices":[{"message":{"content":"{\\"summary\\":\\"ok\\"}"}}]}'
+
+    client = DeepSeekChatClient(environ={"DEEPSEEK_API_KEY": "test-value"}, opener=opener)
+    client.advise(
+        "system",
+        "user",
+        OptimizerConfig(
+            enabled=True,
+            base_url="https://www.micuapi.ai/v1/",
+            model="deepseek-v4-flash-0731",
+        ),
+    )
+
+    body = json.loads(requests[0].data.decode("utf-8"))
+    assert requests[0].full_url == "https://www.micuapi.ai/v1/chat/completions"
+    assert body["model"] == "deepseek-v4-flash-0731"
+
+
 def test_explicit_output_limit_is_sent_and_enforced() -> None:
     requests: list[Request] = []
     oversized_content = "x" * 1_025

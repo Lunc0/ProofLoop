@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Annotated, NoReturn, cast
 
@@ -40,6 +41,7 @@ from skill_evolve.candidate import (
 )
 from skill_evolve.candidate.store import skill_sha256_for_source
 from skill_evolve.config import ManifestError, load_manifest
+from skill_evolve.config.dotenv import read_dotenv_value
 from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.evolution import EvolutionCycleError, EvolutionCycleRequest, run_evolution_cycle
 from skill_evolve.fingerprint import create_snapshot
@@ -194,7 +196,7 @@ def advise_optimizer(run_id: str) -> None:
         optimizer_result = advise_after_evolution(
             run,
             subject,
-            OptimizerConfig(enabled=True),
+            _direct_optimizer_config(),
             run_status=run_status,
         )
     except (RunNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
@@ -226,7 +228,7 @@ def plan_optimizer(run_id: str) -> None:
         plan_result = plan_after_evolution(
             run,
             subject,
-            OptimizerConfig(enabled=True),
+            _direct_optimizer_config(),
             run_status=run_status,
             adapter_id=LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
         )
@@ -609,6 +611,22 @@ def _runs_root() -> Path:
 
 def _candidate_root() -> Path:
     return Path.cwd() / ".local" / "skill-evolve"
+
+
+def _direct_optimizer_config() -> OptimizerConfig:
+    """Resolve non-secret direct-command routing overrides without exporting them."""
+
+    overrides: dict[str, str] = {}
+    for environment_name, field_name in (
+        ("DEEPSEEK_BASE_URL", "base_url"),
+        ("DEEPSEEK_CHAT_MODEL", "model"),
+    ):
+        value = os.environ.get(environment_name)
+        if value is None or not value.strip():
+            value = read_dotenv_value(Path.cwd() / ".env", environment_name)
+        if value is not None and value.strip():
+            overrides[field_name] = value
+    return OptimizerConfig.model_validate({"enabled": True} | overrides)
 
 
 def _candidate_service() -> CandidateService:

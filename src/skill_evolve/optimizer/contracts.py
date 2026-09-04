@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 OptimizerStatus = Literal[
@@ -128,12 +129,20 @@ class OptimizerReceipt(StrictOptimizerModel):
     schema_version: Literal["skill-optimizer-receipt-v1"] = "skill-optimizer-receipt-v1"
     status: OptimizerStatus
     provider: Literal["deepseek"]
-    model: Literal["deepseek-v4-flash"]
+    model: str
+    base_url: str = "https://api.deepseek.com"
     prompt_version: Literal["skill-optimization-advice-prompt-v1"]
     source: AdviceSource | None = None
     advice_sha256: str | None = None
     usage: ProviderUsage | None = None
     error_code: OptimizerErrorCode | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        if _MODEL_NAME_PATTERN.fullmatch(value) is None:
+            raise ValueError("model must be a safe provider model identifier")
+        return value
 
     @field_validator("advice_sha256")
     @classmethod

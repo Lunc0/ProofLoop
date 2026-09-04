@@ -63,6 +63,7 @@ class DynamicPlanClient:
                     "statement": "The projected failure has no observed final validation action.",
                     "case_refs": case_refs,
                     "evidence_refs": evidence_refs,
+                    "block_ids": [target["block_id"]],
                 }
             ],
             "edits": [
@@ -97,6 +98,45 @@ class DynamicPlanClient:
             ],
         }
         return OptimizerClientResponse(json.dumps(response))
+
+
+class MultiLocationClient(DynamicPlanClient):
+    def __init__(self, *, overlap: bool = False) -> None:
+        super().__init__()
+        self.overlap = overlap
+
+    def advise(
+        self, system_prompt: str, user_prompt: str, config: OptimizerConfig
+    ) -> OptimizerClientResponse:
+        response = super().advise(system_prompt, user_prompt, config)
+        payload = _prompt_input(user_prompt)
+        skill_map = payload["skill_map"]
+        assert isinstance(skill_map, dict)
+        blocks = skill_map["blocks"]
+        assert isinstance(blocks, list)
+        editable_blocks = [
+            block
+            for block in blocks
+            if isinstance(block, dict) and block["permission"] != "locked"
+        ]
+        first, second = editable_blocks[:2]
+        assert isinstance(first["block_id"], str)
+        assert isinstance(second["block_id"], str)
+        plan = json.loads(response.content)
+        first_cluster = plan["clusters"][0]
+        first_cluster["block_ids"] = [first["block_id"], second["block_id"]]
+        second_cluster = dict(first_cluster)
+        second_cluster["block_ids"] = [first["block_id"]]
+        plan["clusters"].append(second_cluster)
+        plan["edits"][0]["cluster_indices"] = [1, 2]
+        plan["edits"][0]["placement_after_block_id"] = first["block_id"]
+        second_edit = dict(plan["edits"][0])
+        second_edit["cluster_indices"] = [1]
+        second_edit["placement_after_block_id"] = (
+            first["block_id"] if self.overlap else second["block_id"]
+        )
+        plan["edits"].append(second_edit)
+        return OptimizerClientResponse(json.dumps(plan))
 
 
 class IncorrectGuidanceClient:
@@ -208,7 +248,11 @@ def test_valid_plan_writes_bound_artifacts_without_raw_case_ids(tmp_path: Path) 
     result = plan_after_evolution(
         run,
         subject,
-        OptimizerConfig(enabled=True),
+        OptimizerConfig(
+            enabled=True,
+            base_url="https://www.micuapi.ai/v1",
+            model="deepseek-v4-flash-0731",
+        ),
         run_status="task_failure",
         adapter_id=LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
         client=client,
@@ -235,6 +279,42 @@ def test_valid_plan_writes_bound_artifacts_without_raw_case_ids(tmp_path: Path) 
     receipt = json.loads((artifact_dir / "receipt.json").read_text(encoding="utf-8"))
     plan_bytes = canonical_json_bytes(plan)
     assert receipt["plan_sha256"] == hashlib.sha256(plan_bytes).hexdigest()
+    assert receipt["base_url"] == "https://www.micuapi.ai/v1"
+    assert receipt["model"] == "deepseek-v4-flash-0731"
+    assert receipt["prompt_version"] == "skill-edit-plan-prompt-v4"
+
+
+def test_trusted_prompt_requires_complete_v4_edit_preflight(tmp_path: Path) -> None:
+    run = RunStore(tmp_path / "runs").create()
+    subject = _subject()
+    _write_input(run, subject)
+    client = DynamicPlanClient()
+
+    result = plan_after_evolution(
+        run,
+        subject,
+        OptimizerConfig(enabled=True),
+        run_status="task_failure",
+        adapter_id=LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
+        client=client,
+    )
+
+    assert result.receipt.status == "proposed"
+    system_prompt, _ = client.calls[0]
+    normalized_prompt = system_prompt.replace("\n", " ")
+    assert "only exact bNN IDs" in normalized_prompt
+    assert "every evidence_ref must belong to a listed case_ref" in normalized_prompt
+    assert "missing_recovery_strategy requires block_ids" in normalized_prompt
+    assert "failure_recovery_episode" in normalized_prompt
+    assert "missing_guidance:add_rule" in normalized_prompt
+    assert "cluster_indices are unique and 1-based" in normalized_prompt
+    assert "non-locked bNN block" in normalized_prompt
+    assert "must share at least one" in normalized_prompt
+    assert "A cluster is a problem/evidence unit" in normalized_prompt
+    assert "one deterministic text change" in normalized_prompt
+    assert "add_rule requires an empty target_block_ids" in normalized_prompt
+    assert "Do not reuse any target or placement anchor" in normalized_prompt
+    assert "Do not emit an unanchored or ambiguous edit." in normalized_prompt
 
 
 def test_guarded_target_is_proposed_but_locked_target_is_rejected(
@@ -332,6 +412,50 @@ def test_multiple_failed_cases_cluster_into_one_edit(tmp_path: Path) -> None:
     )
     assert len(plan["clusters"][0]["case_refs"]) == 2
     assert len(plan["clusters"][0]["evidence_refs"]) == 2
+
+
+def test_multiple_clusters_can_share_one_edit_and_one_cluster_can_span_edits(
+    tmp_path: Path,
+) -> None:
+    run = RunStore(tmp_path / "runs").create()
+    subject = _subject()
+    _write_input(run, subject)
+
+    result = plan_after_evolution(
+        run,
+        subject,
+        OptimizerConfig(enabled=True),
+        run_status="task_failure",
+        adapter_id=LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
+        client=MultiLocationClient(),
+    )
+
+    assert result.receipt.status == "proposed"
+    plan = json.loads(
+        (run.path / "optimizer" / "edit-plan" / "edit-plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert plan["edits"][0]["cluster_ids"] == ["cluster-001", "cluster-002"]
+    assert plan["edits"][1]["cluster_ids"] == ["cluster-001"]
+
+
+def test_overlapping_edit_locations_remain_invalid(tmp_path: Path) -> None:
+    run = RunStore(tmp_path / "runs").create()
+    subject = _subject()
+    _write_input(run, subject)
+
+    result = plan_after_evolution(
+        run,
+        subject,
+        OptimizerConfig(enabled=True),
+        run_status="task_failure",
+        adapter_id=LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID,
+        client=MultiLocationClient(overlap=True),
+    )
+
+    assert result.receipt.status == "invalid_response"
+    assert (run.path / "optimizer" / "edit-plan" / "raw-response.txt").exists()
 
 
 def test_private_path_in_semantic_text_is_rejected(tmp_path: Path) -> None:
