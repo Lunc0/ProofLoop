@@ -110,7 +110,7 @@ class IncorrectGuidanceClient:
             block
             for block in payload["skill_map"]["blocks"]
             if block["block_type"] == "paragraph"
-            and block["heading_path"][-1] == "Tool Execution"
+            and block["section"] == "Tool Execution"
         )
         response = {
             "schema_version": "skill-edit-plan-model-v1",

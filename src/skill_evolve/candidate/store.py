@@ -20,8 +20,11 @@ from skill_evolve.candidate.contracts import (
     split_candidate_id,
     validate_skill_id,
 )
+from skill_evolve.optimizer.skill_map import build_skill_map
+from skill_evolve.trajectory.compressor import canonical_json_bytes
 
 MAX_SKILL_BYTES = 512 * 1024
+MAX_SKILL_MAP_BYTES = 2 * 1024 * 1024
 MAX_NOTICE_BYTES = 512 * 1024
 
 
@@ -94,6 +97,36 @@ class LocalCandidateStore:
 
         return self.resolve_and_verify(candidate_id)
 
+    def backfill_skill_map(self, candidate_id: str) -> ResolvedCandidate:
+        """Add a locally generated Map to one verified legacy candidate."""
+
+        catalog = self._load_catalog()
+        candidate = self._resolve_and_verify_from_catalog(
+            candidate_id,
+            catalog,
+            allow_missing_skill_map=True,
+        )
+        directory = self._candidate_directory(candidate.candidate_id)
+        map_path = directory / "skill-map.json"
+        if map_path.exists() or map_path.is_symlink():
+            raise CandidateStoreError("candidate skill-map.json already exists")
+        _write_atomic(map_path, _skill_map_bytes(candidate.skill_bytes))
+        return self.resolve_and_verify(candidate_id)
+
+    def rebuild_skill_map(self, candidate_id: str) -> ResolvedCandidate:
+        """Replace one candidate Map with the current deterministic format."""
+
+        catalog = self._load_catalog()
+        candidate = self._resolve_and_verify_from_catalog(
+            candidate_id,
+            catalog,
+            allow_missing_skill_map=True,
+            allow_invalid_skill_map=True,
+        )
+        map_path = self._candidate_directory(candidate.candidate_id) / "skill-map.json"
+        _write_atomic(map_path, _skill_map_bytes(candidate.skill_bytes))
+        return self.resolve_and_verify(candidate_id)
+
     def select(self, candidate_id: str) -> ResolvedCandidate:
         """Select one verified candidate without mutating candidate metadata or content."""
 
@@ -138,6 +171,7 @@ class LocalCandidateStore:
         skill_sha256 = hashlib.sha256(skill_bytes).hexdigest()
         if skill_sha256 != metadata.skill_sha256:
             raise CandidateStoreError("SKILL.md source hash does not match candidate metadata")
+        skill_map_bytes = _skill_map_bytes(skill_bytes)
         notice_bytes = (
             _read_text_file(notice_source, MAX_NOTICE_BYTES, "NOTICE.md source")
             if notice_source is not None
@@ -157,6 +191,7 @@ class LocalCandidateStore:
         staging_directory = Path(tempfile.mkdtemp(prefix=".candidate-", dir=candidate_root))
         try:
             _write_atomic(staging_directory / "SKILL.md", skill_bytes)
+            _write_atomic(staging_directory / "skill-map.json", skill_map_bytes)
             _write_atomic(
                 staging_directory / "metadata.json",
                 (metadata.model_dump_json(indent=2) + "\n").encode("utf-8"),
@@ -188,7 +223,12 @@ class LocalCandidateStore:
         return self.resolve_and_verify(metadata.candidate_id)
 
     def _resolve_and_verify_from_catalog(
-        self, candidate_id: str, catalog: CandidateCatalog
+        self,
+        candidate_id: str,
+        catalog: CandidateCatalog,
+        *,
+        allow_missing_skill_map: bool = False,
+        allow_invalid_skill_map: bool = False,
     ) -> ResolvedCandidate:
         try:
             split_candidate_id(candidate_id)
@@ -207,7 +247,11 @@ class LocalCandidateStore:
             entry = entries_by_id.get(current_id)
             if entry is None:
                 raise CandidateStoreError(f"candidate lineage parent is missing: {current_id}")
-            metadata, skill_bytes = self._read_candidate_files(current_id)
+            metadata, skill_bytes = self._read_candidate_files(
+                current_id,
+                allow_missing_skill_map=allow_missing_skill_map,
+                allow_invalid_skill_map=allow_invalid_skill_map,
+            )
             _verify_catalog_entry(metadata, entry, skill_bytes)
             verified[current_id] = (metadata, entry, skill_bytes)
             current_id = metadata.parent_candidate_id
@@ -215,7 +259,13 @@ class LocalCandidateStore:
         metadata, entry, skill_bytes = verified[candidate_id]
         return ResolvedCandidate(metadata=metadata, catalog_entry=entry, skill_bytes=skill_bytes)
 
-    def _read_candidate_files(self, candidate_id: str) -> tuple[CandidateMetadata, bytes]:
+    def _read_candidate_files(
+        self,
+        candidate_id: str,
+        *,
+        allow_missing_skill_map: bool = False,
+        allow_invalid_skill_map: bool = False,
+    ) -> tuple[CandidateMetadata, bytes]:
         directory = self._candidate_directory(candidate_id)
         if not directory.is_dir() or directory.is_symlink():
             raise CandidateStoreError(f"candidate directory is missing or unsafe: {candidate_id}")
@@ -230,8 +280,17 @@ class LocalCandidateStore:
             raise CandidateStoreError(
                 f"invalid candidate metadata for {candidate_id}: {error}"
             ) from error
+        map_path = directory / "skill-map.json"
+        if not map_path.exists() and allow_missing_skill_map:
+            skill_map_present = False
+        else:
+            skill_map_present = True
+            if not allow_invalid_skill_map:
+                _validate_skill_map(map_path, skill_bytes, candidate_id)
         notice_path = directory / "NOTICE.md"
         allowed_names = {"SKILL.md", "metadata.json"}
+        if skill_map_present:
+            allowed_names.add("skill-map.json")
         if metadata.external_source is not None:
             if not _is_regular_file(notice_path):
                 raise CandidateStoreError(
@@ -249,7 +308,7 @@ class LocalCandidateStore:
             ) from error
         if actual_names != allowed_names:
             raise CandidateStoreError(
-                "candidate directory may contain only SKILL.md and metadata.json"
+                "candidate directory has an invalid file set"
             )
         return metadata, skill_bytes
 
@@ -355,6 +414,20 @@ def skill_sha256_for_source(path: Path) -> str:
     """Hash a prospective Skill only after applying the store's text-file limits."""
 
     return hashlib.sha256(_read_text_file(path, MAX_SKILL_BYTES, "SKILL.md source")).hexdigest()
+
+
+def _skill_map_bytes(skill_bytes: bytes) -> bytes:
+    try:
+        skill_map = build_skill_map(skill_bytes, max_input_bytes=MAX_SKILL_BYTES)
+    except ValueError as error:
+        raise CandidateStoreError(f"could not build candidate skill-map: {error}") from error
+    return canonical_json_bytes(skill_map.model_dump(mode="json")) + b"\n"
+
+
+def _validate_skill_map(map_path: Path, skill_bytes: bytes, candidate_id: str) -> None:
+    map_bytes = _read_text_file(map_path, MAX_SKILL_MAP_BYTES, "candidate skill-map.json")
+    if map_bytes != _skill_map_bytes(skill_bytes):
+        raise CandidateStoreError("candidate skill-map does not match candidate SKILL.md")
 
 
 def _is_regular_file(path: Path) -> bool:

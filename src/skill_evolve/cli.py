@@ -722,6 +722,40 @@ def verify_candidate(candidate_id: str) -> None:
     )
 
 
+@candidate_app.command("backfill-skill-map")
+def backfill_candidate_skill_map(candidate_id: str) -> None:
+    """Create the missing locally generated SkillMap for one legacy candidate."""
+
+    try:
+        candidate = _candidate_service().backfill_skill_map(candidate_id)
+    except (CandidateStoreError, ValueError) as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(
+        {
+            "candidate_id": candidate.candidate_id,
+            "skill_map_path": "skill-map.json",
+            "skill_sha256": candidate.skill_sha256,
+        }
+    )
+
+
+@candidate_app.command("rebuild-skill-map")
+def rebuild_candidate_skill_map(candidate_id: str) -> None:
+    """Replace one candidate Map with the current compact deterministic format."""
+
+    try:
+        candidate = _candidate_service().rebuild_skill_map(candidate_id)
+    except (CandidateStoreError, ValueError) as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(
+        {
+            "candidate_id": candidate.candidate_id,
+            "skill_map_path": "skill-map.json",
+            "skill_sha256": candidate.skill_sha256,
+        }
+    )
+
+
 @candidate_app.command("select")
 def select_candidate(candidate_id: str) -> None:
     """Set the local default for one Skill without modifying candidate files."""

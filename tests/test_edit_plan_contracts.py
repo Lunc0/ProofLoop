@@ -16,8 +16,8 @@ from skill_evolve.optimizer.edit_plan_contracts import (
 
 _CASE_REF = "case-001-0123456789ab"
 _EVIDENCE_REF = "evidence-001-001-0123456789ab"
-_BLOCK_1 = "block-0123456789abcdef"
-_BLOCK_2 = "block-fedcba9876543210"
+_BLOCK_1 = "b01"
+_BLOCK_2 = "b02"
 
 
 def test_incorrect_guidance_requires_block_and_contract_field() -> None:

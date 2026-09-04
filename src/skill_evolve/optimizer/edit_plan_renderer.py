@@ -17,6 +17,7 @@ from skill_evolve.optimizer.edit_plan_contracts import (
     WorkflowRule,
 )
 from skill_evolve.optimizer.skill_map import build_skill_map
+from skill_evolve.trajectory.compressor import canonical_json_bytes
 
 RENDER_POLICY_VERSION = "skill-edit-render-policy-v1"
 _HUNK_PATTERN = re.compile(
@@ -60,6 +61,10 @@ def render_edit_plan(parent_bytes: bytes, plan: SkillEditPlan) -> RenderedSkill:
         raise EditPlanRenderError("parent Skill must not contain NUL")
 
     skill_map = build_skill_map(parent_bytes)
+    if plan.source.skill_map_sha256 != _sha256(
+        canonical_json_bytes(skill_map.model_dump(mode="json"))
+    ):
+        raise EditPlanRenderError("Skill map hash does not match the edit plan")
     blocks = {block.block_id: block for block in skill_map.blocks}
     offsets = _line_offsets(parent_text)
     replacements: list[_Replacement] = []

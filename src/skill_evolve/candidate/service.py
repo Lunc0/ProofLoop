@@ -98,6 +98,12 @@ class CandidateService:
     def verify(self, candidate_id: str) -> ResolvedCandidate:
         return self._store.verify(candidate_id)
 
+    def backfill_skill_map(self, candidate_id: str) -> ResolvedCandidate:
+        return self._store.backfill_skill_map(candidate_id)
+
+    def rebuild_skill_map(self, candidate_id: str) -> ResolvedCandidate:
+        return self._store.rebuild_skill_map(candidate_id)
+
     def select(self, candidate_id: str) -> ResolvedCandidate:
         return self._store.select(candidate_id)
 

@@ -54,6 +54,13 @@ def test_store_creates_immutable_baseline_child_and_local_selection(tmp_path: Pa
     ]
     root = tmp_path / ".local" / "skill-evolve"
     assert (root / "candidates" / "sql-analyst" / "000-baseline" / "SKILL.md").is_file()
+    skill_map = json.loads(
+        (root / "candidates" / "sql-analyst" / "000-baseline" / "skill-map.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert skill_map["schema_version"] == "skill-map-v2"
+    assert "skill_sha256" not in skill_map
     assert not (root / "candidates" / "sql-analyst" / "000-baseline" / "NOTICE.md").exists()
 
 
@@ -89,7 +96,7 @@ def test_store_requires_external_provenance_notice_and_detects_tampering(tmp_pat
     assert skill_path.with_name("NOTICE.md").read_text(encoding="utf-8") == "MIT License\n"
     skill_path.write_text("# Tampered\n", encoding="utf-8")
 
-    with pytest.raises(CandidateStoreError, match="hash"):
+    with pytest.raises(CandidateStoreError, match="does not match"):
         service.verify(baseline.candidate_id)
 
 
@@ -108,8 +115,64 @@ def test_store_rejects_candidate_attachments(tmp_path: Path) -> None:
     )
     attachment.write_text("raise RuntimeError('never execute')\n", encoding="utf-8")
 
-    with pytest.raises(CandidateStoreError, match="may contain only"):
+    with pytest.raises(CandidateStoreError, match="invalid file set"):
         service.verify(candidate.candidate_id)
+
+
+def test_store_rejects_missing_or_mismatched_skill_map_and_backfills_explicitly(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    candidate = service.initialise("sql-analyst", _write_skill(tmp_path / "sources" / "skill.md"))
+    map_path = (
+        tmp_path
+        / ".local"
+        / "skill-evolve"
+        / "candidates"
+        / "sql-analyst"
+        / "000-baseline"
+        / "skill-map.json"
+    )
+
+    map_path.unlink()
+    with pytest.raises(CandidateStoreError, match="skill-map.json"):
+        service.verify(candidate.candidate_id)
+
+    backfilled = service.backfill_skill_map(candidate.candidate_id)
+    assert backfilled.candidate_id == candidate.candidate_id
+    skill_map = json.loads(map_path.read_text(encoding="utf-8"))
+    assert skill_map["schema_version"] == "skill-map-v2"
+    with pytest.raises(CandidateStoreError, match="already exists"):
+        service.backfill_skill_map(candidate.candidate_id)
+
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    payload["parser_policy_version"] = "tampered"
+    map_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(CandidateStoreError, match="does not match"):
+        service.verify(candidate.candidate_id)
+
+
+def test_store_rebuilds_an_existing_legacy_skill_map_explicitly(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    candidate = service.initialise("sql-analyst", _write_skill(tmp_path / "sources" / "skill.md"))
+    map_path = (
+        tmp_path
+        / ".local"
+        / "skill-evolve"
+        / "candidates"
+        / "sql-analyst"
+        / "000-baseline"
+        / "skill-map.json"
+    )
+    map_path.write_text('{"schema_version":"skill-map-v1"}', encoding="utf-8")
+
+    with pytest.raises(CandidateStoreError, match="does not match"):
+        service.verify(candidate.candidate_id)
+
+    rebuilt = service.rebuild_skill_map(candidate.candidate_id)
+
+    assert rebuilt.candidate_id == candidate.candidate_id
+    assert json.loads(map_path.read_text(encoding="utf-8"))["schema_version"] == "skill-map-v2"
 
 
 def test_store_persists_optimizer_provenance_for_a_draft_child(tmp_path: Path) -> None:

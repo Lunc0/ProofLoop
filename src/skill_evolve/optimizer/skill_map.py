@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 
 from skill_evolve.optimizer.edit_plan_contracts import (
@@ -87,22 +86,8 @@ def build_skill_map(skill_bytes: bytes, *, max_input_bytes: int = 524_288) -> Sk
     blocks: list[SkillBlock] = []
     headings: dict[int, str] = {}
     index = 0
-    skill_sha256 = hashlib.sha256(skill_bytes).hexdigest()
-
     if _line_text(lines[0]) == "---":
         closing = _find_frontmatter_end(lines)
-        blocks.append(
-            _make_block(
-                skill_sha256,
-                lines,
-                0,
-                closing,
-                (),
-                "frontmatter",
-                "hard_contract",
-                "locked",
-            )
-        )
         index = closing + 1
 
     while index < len(lines):
@@ -118,19 +103,6 @@ def build_skill_map(skill_bytes: bytes, *, max_input_bytes: int = 524_288) -> Sk
             headings = {key: value for key, value in headings.items() if key < level}
             headings[level] = title
             path = tuple(headings[key] for key in sorted(headings))
-            layer, permission = _classify(path, "heading")
-            blocks.append(
-                _make_block(
-                    skill_sha256,
-                    lines,
-                    index,
-                    index,
-                    path,
-                    "heading",
-                    layer,
-                    permission,
-                )
-            )
             index += 1
             continue
 
@@ -138,19 +110,6 @@ def build_skill_map(skill_bytes: bytes, *, max_input_bytes: int = 524_288) -> Sk
         fence = _FENCE_PATTERN.match(stripped)
         if fence is not None:
             end = _find_fence_end(lines, index, fence.group(1))
-            layer, permission = _classify(path, "fenced_code")
-            blocks.append(
-                _make_block(
-                    skill_sha256,
-                    lines,
-                    index,
-                    end,
-                    path,
-                    "fenced_code",
-                    layer,
-                    permission,
-                )
-            )
             index = end + 1
             continue
 
@@ -158,19 +117,6 @@ def build_skill_map(skill_bytes: bytes, *, max_input_bytes: int = 524_288) -> Sk
             end = index + 1
             while end + 1 < len(lines) and "|" in _line_text(lines[end + 1]):
                 end += 1
-            layer, permission = _classify(path, "table")
-            blocks.append(
-                _make_block(
-                    skill_sha256,
-                    lines,
-                    index,
-                    end,
-                    path,
-                    "table",
-                    layer,
-                    permission,
-                )
-            )
             index = end + 1
             continue
 
@@ -190,14 +136,13 @@ def build_skill_map(skill_bytes: bytes, *, max_input_bytes: int = 524_288) -> Sk
             layer, permission = _classify(path, "list")
             blocks.append(
                 _make_block(
-                    skill_sha256,
-                    lines,
                     index,
                     end,
                     path,
                     "list",
                     layer,
                     permission,
+                    len(blocks) + 1,
                 )
             )
             index = end + 1
@@ -219,23 +164,18 @@ def build_skill_map(skill_bytes: bytes, *, max_input_bytes: int = 524_288) -> Sk
         layer, permission = _classify(path, "paragraph")
         blocks.append(
             _make_block(
-                skill_sha256,
-                lines,
                 index,
                 end,
                 path,
                 "paragraph",
                 layer,
                 permission,
+                len(blocks) + 1,
             )
         )
         index = end + 1
 
-    if not blocks:
-        raise ValueError("Skill content did not produce any stable blocks")
     return SkillMap(
-        skill_sha256=skill_sha256,
-        line_count=len(lines),
         blocks=tuple(blocks),
     )
 
@@ -292,35 +232,20 @@ def _normalize_heading(value: str) -> str:
 
 
 def _make_block(
-    skill_sha256: str,
-    lines: list[str],
     start: int,
     end: int,
     heading_path: tuple[str, ...],
     block_type: SkillBlockType,
     layer: SkillLayer,
     permission: SkillPermission,
+    index: int,
 ) -> SkillBlock:
-    content = "".join(lines[start : end + 1]).encode("utf-8")
-    content_sha256 = hashlib.sha256(content).hexdigest()
-    identity = "\x1f".join(
-        (
-            skill_sha256,
-            "/".join(heading_path),
-            block_type,
-            str(start + 1),
-            str(end + 1),
-            content_sha256,
-        )
-    ).encode("utf-8")
-    block_id = f"block-{hashlib.sha256(identity).hexdigest()[:16]}"
     return SkillBlock(
-        block_id=block_id,
-        heading_path=heading_path,
+        block_id=f"b{index:02d}",
+        section=heading_path[-1] if heading_path else "",
         block_type=block_type,
         start_line=start + 1,
         end_line=end + 1,
-        content_sha256=content_sha256,
         layer=layer,
         permission=permission,
     )

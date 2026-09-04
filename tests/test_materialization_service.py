@@ -157,7 +157,9 @@ def _plan(
             parent_skill_sha256=hashlib.sha256(parent).hexdigest(),
             agent_input_sha256="a" * 64,
             target_contract_sha256="b" * 64,
-            skill_map_sha256="c" * 64,
+            skill_map_sha256=hashlib.sha256(
+                canonical_json_bytes(skill_map.model_dump(mode="json"))
+            ).hexdigest(),
         ),
         summary="legacy" if historical_guarded_status else "Add one validation rule.",
         clusters=(cluster,),

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from skill_evolve.optimizer.contracts import ProviderUsage
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-_BLOCK_ID_PATTERN = re.compile(r"^block-[0-9a-f]{16}$")
+_BLOCK_ID_PATTERN = re.compile(r"^b(?:0[1-9]|[1-9][0-9]*)$")
 _LOCAL_REF_PATTERN = re.compile(r"^(?:case|evidence)-[0-9]{3}(?:-[0-9]{3})?-[0-9a-f]{12}$")
 _LOCAL_ID_PATTERN = re.compile(r"^(?:cluster|edit)-[0-9]{3}$")
 _CONTRACT_FIELD_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
@@ -107,11 +107,10 @@ def normalise_historical_edit_plan_status(value: object) -> Literal["proposed", 
 
 class SkillBlock(StrictEditPlanModel):
     block_id: str
-    heading_path: tuple[str, ...] = Field(max_length=16)
+    section: str = Field(max_length=256)
     block_type: SkillBlockType
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
-    content_sha256: str
     layer: SkillLayer
     permission: SkillPermission
 
@@ -122,29 +121,19 @@ class SkillBlock(StrictEditPlanModel):
             raise ValueError("block_id has an invalid format")
         return value
 
-    @field_validator("content_sha256")
-    @classmethod
-    def validate_content_sha256(cls, value: str) -> str:
-        return _validate_sha256(value)
-
     @model_validator(mode="after")
     def validate_line_range(self) -> SkillBlock:
         if self.end_line < self.start_line:
             raise ValueError("end_line must not precede start_line")
+        if self.block_type not in {"paragraph", "list"}:
+            raise ValueError("Skill map blocks must be paragraphs or lists")
         return self
 
 
 class SkillMap(StrictEditPlanModel):
-    schema_version: Literal["skill-map-v1"] = "skill-map-v1"
-    parser_policy_version: Literal["skill-map-policy-v1"] = "skill-map-policy-v1"
-    skill_sha256: str
-    line_count: int = Field(ge=0)
-    blocks: tuple[SkillBlock, ...] = Field(min_length=1, max_length=4096)
-
-    @field_validator("skill_sha256")
-    @classmethod
-    def validate_skill_sha256(cls, value: str) -> str:
-        return _validate_sha256(value)
+    schema_version: Literal["skill-map-v2"] = "skill-map-v2"
+    parser_policy_version: Literal["skill-map-policy-v2"] = "skill-map-policy-v2"
+    blocks: tuple[SkillBlock, ...] = Field(max_length=4096)
 
     @model_validator(mode="after")
     def validate_blocks(self) -> SkillMap:
@@ -155,8 +144,6 @@ class SkillMap(StrictEditPlanModel):
         for block in self.blocks:
             if block.start_line <= previous_end:
                 raise ValueError("Skill map blocks must be ordered and non-overlapping")
-            if block.end_line > self.line_count:
-                raise ValueError("Skill map block exceeds line_count")
             previous_end = block.end_line
         return self
 

@@ -27,6 +27,33 @@ def test_candidate_cli_lifecycle_never_prints_skill_text(tmp_path: Path, monkeyp
     assert "DO NOT PRINT THIS SKILL TEXT" not in initialised.stdout
     assert json.loads(initialised.stdout)["binding"]["candidate_id"] == "sql-analyst/000-baseline"
 
+    map_path = (
+        tmp_path
+        / ".local"
+        / "skill-evolve"
+        / "candidates"
+        / "sql-analyst"
+        / "000-baseline"
+        / "skill-map.json"
+    )
+    map_path.unlink()
+    backfilled = runner.invoke(
+        app,
+        ["candidate", "backfill-skill-map", "sql-analyst/000-baseline"],
+    )
+    assert backfilled.exit_code == 0
+    assert json.loads(backfilled.stdout)["skill_map_path"] == "skill-map.json"
+    assert "DO NOT PRINT THIS SKILL TEXT" not in backfilled.stdout
+
+    map_path.write_text('{"schema_version":"skill-map-v1"}', encoding="utf-8")
+    rebuilt = runner.invoke(
+        app,
+        ["candidate", "rebuild-skill-map", "sql-analyst/000-baseline"],
+    )
+    assert rebuilt.exit_code == 0
+    assert json.loads(rebuilt.stdout)["skill_map_path"] == "skill-map.json"
+    assert "DO NOT PRINT THIS SKILL TEXT" not in rebuilt.stdout
+
     run = RunStore(tmp_path / "runs").create()
     imported = runner.invoke(
         app,

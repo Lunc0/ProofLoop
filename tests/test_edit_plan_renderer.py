@@ -20,6 +20,7 @@ from skill_evolve.optimizer.edit_plan_renderer import (
     render_edit_plan,
 )
 from skill_evolve.optimizer.skill_map import build_skill_map
+from skill_evolve.trajectory.compressor import canonical_json_bytes
 
 
 def test_add_rule_renders_stable_patch_and_round_trips() -> None:
@@ -43,6 +44,17 @@ def test_locked_target_and_unsupported_reorder_fail_closed() -> None:
     plan = _plan(parent, permission="evolvable", operation="reorder_workflow")
     with pytest.raises(EditPlanRenderError, match="not renderable"):
         render_edit_plan(parent, plan)
+
+
+def test_map_hash_mismatch_rejects_short_ids_from_another_map() -> None:
+    parent = _skill()
+    plan = _plan(parent, permission="evolvable")
+    mismatched = plan.model_copy(
+        update={"source": plan.source.model_copy(update={"skill_map_sha256": "a" * 64})}
+    )
+
+    with pytest.raises(EditPlanRenderError, match="map hash"):
+        render_edit_plan(parent, mismatched)
 
 
 def test_merge_rejects_non_contiguous_targets() -> None:
@@ -99,7 +111,7 @@ def _plan_with_targets(
         parent_skill_sha256=hashlib.sha256(parent).hexdigest(),
         agent_input_sha256="a" * 64,
         target_contract_sha256="b" * 64,
-        skill_map_sha256="c" * 64,
+        skill_map_sha256=_skill_map_sha256(build_skill_map(parent)),
     )
     cluster = DefectCluster(
         cluster_id="cluster-001",
@@ -147,3 +159,7 @@ def _plan_with_targets(
         clusters=(cluster,),
         edits=(edit,),
     )
+
+
+def _skill_map_sha256(skill_map) -> str:
+    return hashlib.sha256(canonical_json_bytes(skill_map.model_dump(mode="json"))).hexdigest()
