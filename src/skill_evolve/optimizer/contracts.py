@@ -20,7 +20,30 @@ OptimizerStatus = Literal[
     "invalid_response",
     "unavailable",
 ]
-OptimizerErrorCode = Literal["missing_api_key", "request_failed", "invalid_response"]
+OptimizerRequestFailureCode = Literal[
+    "request_failed",
+    "request_timeout",
+    "network_error",
+    "http_4xx",
+    "http_5xx",
+    "http_other",
+    "provider_response_invalid",
+    "response_limit_exceeded",
+    "unexpected_error",
+]
+OptimizerErrorCode = Literal[
+    "missing_api_key",
+    "request_failed",
+    "request_timeout",
+    "network_error",
+    "http_4xx",
+    "http_5xx",
+    "http_other",
+    "provider_response_invalid",
+    "response_limit_exceeded",
+    "unexpected_error",
+    "invalid_response",
+]
 
 
 class StrictOptimizerModel(BaseModel):

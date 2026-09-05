@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from skill_evolve.optimizer.contracts import ProviderUsage
+from skill_evolve.optimizer.contracts import OptimizerErrorCode, ProviderUsage
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -70,7 +70,7 @@ EditPlanStatus = Literal[
     "invalid_response",
     "unavailable",
 ]
-EditPlanErrorCode = Literal["missing_api_key", "request_failed", "invalid_response"]
+EditPlanErrorCode = OptimizerErrorCode
 _LEGACY_GUARDED_APPROVAL_STATUS = "requires_guarded_approval"
 
 

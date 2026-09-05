@@ -146,6 +146,11 @@ optimizer/edit-plan/
 `optimizer_edit_plan` 摘要键记录状态、相对路径、hash 和数量，不覆盖 v0.9 的 `optimizer` advice 摘要；
 stdout 不输出 Skill、任务内容、evidence 或计划正文。
 
+`model_failed` receipt 的 `error_code` 只会记录固定的非敏感类别：`request_timeout`、`network_error`、
+`http_4xx`、`http_5xx`、`http_other`、`provider_response_invalid`、`response_limit_exceeded` 或
+`unexpected_error`。历史 `request_failed` 仍可读取；receipt 不记录异常文本、URL、HTTP body、模型原文或具体
+HTTP status。
+
 ## EditPlan 渲染与 Child Skill（v0.12）
 
 对已有的、完成的 Evolution run，可显式将其 EditPlan 渲染为不可变 draft child：

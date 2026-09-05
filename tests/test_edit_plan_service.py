@@ -11,6 +11,7 @@ from skill_evolve.benchmark import (
 )
 from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.optimizer.client import OptimizerClientResponse
+from skill_evolve.optimizer.deepseek import OptimizerRequestError
 from skill_evolve.optimizer.edit_plan_service import plan_after_evolution
 from skill_evolve.registry.store import RunStore
 from skill_evolve.subject import RunSubject
@@ -141,6 +142,28 @@ def test_findings_only_and_untrusted_prompt_delimiter_are_handled(tmp_path: Path
     assert "\\u003c/untrusted_edit_plan_input\\u003e" in client.calls[0][1]
 
 
+def test_model_failure_receipt_uses_a_sanitized_request_code(tmp_path: Path) -> None:
+    subject = _subject()
+    for name, error, expected_code in (
+        ("provider", OptimizerRequestError("http_4xx"), "http_4xx"),
+        ("timeout", TimeoutError("not persisted"), "request_timeout"),
+        ("network", OSError("not persisted"), "network_error"),
+        ("unexpected", RuntimeError("not persisted"), "unexpected_error"),
+    ):
+        run = RunStore(tmp_path / name).create()
+        _write_input(run, subject)
+
+        result = _plan(run, subject, FailingPlanClient(error))
+
+        assert result.receipt.status == "model_failed"
+        assert result.receipt.error_code == expected_code
+        receipt_text = (
+            run.path / "optimizer" / "edit-plan" / "receipt.json"
+        ).read_text(encoding="utf-8")
+        assert expected_code in receipt_text
+        assert "not persisted" not in receipt_text
+
+
 class PlanClient:
     def __init__(
         self,
@@ -221,6 +244,17 @@ class PlanClient:
             "target_block_id": target["block_id"],
             "replacement_markdown": fragment,
         }
+
+
+class FailingPlanClient:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def advise(
+        self, system_prompt: str, user_prompt: str, config: OptimizerConfig
+    ) -> OptimizerClientResponse:
+        del system_prompt, user_prompt, config
+        raise self._error
 
 
 def _common_edit(operation: str) -> dict[str, object]:

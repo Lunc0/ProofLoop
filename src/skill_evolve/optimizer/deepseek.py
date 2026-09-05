@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from skill_evolve.config.dotenv import read_dotenv_value
 from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.optimizer.client import OptimizerClientResponse
-from skill_evolve.optimizer.contracts import ProviderUsage
+from skill_evolve.optimizer.contracts import OptimizerRequestFailureCode, ProviderUsage
 
 
 class MissingOptimizerApiKeyError(RuntimeError):
@@ -21,6 +21,10 @@ class MissingOptimizerApiKeyError(RuntimeError):
 
 class OptimizerRequestError(RuntimeError):
     """The provider did not return one valid, bounded completion."""
+
+    def __init__(self, error_code: OptimizerRequestFailureCode) -> None:
+        super().__init__(f"optimizer request failed: {error_code}")
+        self.error_code = error_code
 
 
 HttpOpener = Callable[[Request, float], tuple[int, bytes]]
@@ -71,21 +75,27 @@ class DeepSeekChatClient:
         )
         try:
             status, response_bytes = self._opener(request, config.timeout_ms / 1000)
-        except (HTTPError, URLError, OSError, TimeoutError) as error:
-            raise OptimizerRequestError("optimizer request failed") from error
+        except HTTPError as error:
+            raise OptimizerRequestError(_http_error_code(error.code)) from error
+        except TimeoutError as error:
+            raise OptimizerRequestError("request_timeout") from error
+        except URLError as error:
+            raise OptimizerRequestError("network_error") from error
+        except OSError as error:
+            raise OptimizerRequestError("network_error") from error
         if status < 200 or status >= 300:
-            raise OptimizerRequestError("optimizer request failed")
+            raise OptimizerRequestError(_http_error_code(status))
         try:
             response = json.loads(response_bytes.decode("utf-8"))
             content = _response_content(response)
             usage = _response_usage(response)
         except (TypeError, UnicodeDecodeError, ValueError) as error:
-            raise OptimizerRequestError("optimizer response was invalid") from error
+            raise OptimizerRequestError("provider_response_invalid") from error
         if (
             config.max_output_tokens is not None
             and len(content.encode("utf-8")) > config.max_output_tokens * 16
         ):
-            raise OptimizerRequestError("optimizer response exceeded the configured limit")
+            raise OptimizerRequestError("response_limit_exceeded")
         return OptimizerClientResponse(content=content, usage=usage)
 
     def _api_key(self, key_name: str) -> str | None:
@@ -112,6 +122,14 @@ def _chat_completions_url(base_url: str) -> str:
 def _open_request(request: Request, timeout_seconds: float) -> tuple[int, bytes]:
     with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
         return response.status, response.read()
+
+
+def _http_error_code(status: int) -> OptimizerRequestFailureCode:
+    if 400 <= status < 500:
+        return "http_4xx"
+    if 500 <= status < 600:
+        return "http_5xx"
+    return "http_other"
 
 
 def _response_content(response: object) -> str:

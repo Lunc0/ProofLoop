@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from skill_evolve.optimizer.contracts import AdviceSuggestion, ModelAdvice
+from skill_evolve.optimizer.contracts import AdviceSuggestion, ModelAdvice, OptimizerReceipt
 
 
 def test_model_advice_rejects_unknown_cases_and_full_skill_documents() -> None:
@@ -36,3 +36,15 @@ def test_model_advice_rejects_duplicate_evidence_case_ids() -> None:
                 ),
             ),
         )
+
+
+def test_receipt_accepts_historical_request_failed_code() -> None:
+    receipt = OptimizerReceipt(
+        status="model_failed",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        prompt_version="skill-optimization-advice-prompt-v1",
+        error_code="request_failed",
+    )
+
+    assert receipt.error_code == "request_failed"

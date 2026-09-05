@@ -157,14 +157,32 @@ def plan_after_evolution(
             skill_map_sha256=skill_map_sha256,
             error_code="missing_api_key",
         )
-    except (OptimizerRequestError, OSError, TimeoutError):
+    except OptimizerRequestError as error:
         return _terminal_result(
             run,
             optimizer,
             "model_failed",
             source=source,
             skill_map_sha256=skill_map_sha256,
-            error_code="request_failed",
+            error_code=error.error_code,
+        )
+    except TimeoutError:
+        return _terminal_result(
+            run,
+            optimizer,
+            "model_failed",
+            source=source,
+            skill_map_sha256=skill_map_sha256,
+            error_code="request_timeout",
+        )
+    except OSError:
+        return _terminal_result(
+            run,
+            optimizer,
+            "model_failed",
+            source=source,
+            skill_map_sha256=skill_map_sha256,
+            error_code="network_error",
         )
     except Exception:
         return _terminal_result(
@@ -173,7 +191,7 @@ def plan_after_evolution(
             "model_failed",
             source=source,
             skill_map_sha256=skill_map_sha256,
-            error_code="request_failed",
+            error_code="unexpected_error",
         )
 
     try:

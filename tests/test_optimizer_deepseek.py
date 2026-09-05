@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 import pytest
@@ -103,8 +104,10 @@ def test_explicit_output_limit_is_sent_and_enforced() -> None:
 
     client = DeepSeekChatClient(environ={"DEEPSEEK_API_KEY": "test-value"}, opener=opener)
 
-    with pytest.raises(OptimizerRequestError, match="configured limit"):
+    with pytest.raises(OptimizerRequestError) as error:
         client.advise("system", "user", OptimizerConfig(enabled=True, max_output_tokens=64))
+
+    assert error.value.error_code == "response_limit_exceeded"
 
     body = json.loads(requests[0].data.decode("utf-8"))
     assert body["max_tokens"] == 64
@@ -147,11 +150,53 @@ def test_process_api_key_takes_precedence_over_local_dotenv(tmp_path: Path) -> N
     assert requests[0].get_header("Authorization") == "Bearer process-test-key"
 
 
-def test_non_success_response_is_normalized() -> None:
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    ((429, "http_4xx"), (503, "http_5xx"), (302, "http_other")),
+)
+def test_non_success_response_is_classified(status: int, error_code: str) -> None:
     client = DeepSeekChatClient(
         environ={"DEEPSEEK_API_KEY": "test-value"},
-        opener=lambda request, timeout: (429, b"rate limited"),
+        opener=lambda request, timeout: (status, b"provider response omitted"),
     )
 
-    with pytest.raises(OptimizerRequestError, match="request failed"):
+    with pytest.raises(OptimizerRequestError) as error:
         client.advise("system", "user", OptimizerConfig(enabled=True))
+
+    assert error.value.error_code == error_code
+
+
+@pytest.mark.parametrize(
+    ("raised", "error_code"),
+    (
+        (TimeoutError("transient timeout"), "request_timeout"),
+        (URLError("transient network failure"), "network_error"),
+        (
+            HTTPError("https://provider.invalid", 503, "ignored", hdrs=None, fp=None),
+            "http_5xx",
+        ),
+    ),
+)
+def test_transport_exceptions_are_classified(raised: Exception, error_code: str) -> None:
+    def opener(request: Request, timeout: float) -> tuple[int, bytes]:
+        del request, timeout
+        raise raised
+
+    client = DeepSeekChatClient(environ={"DEEPSEEK_API_KEY": "test-value"}, opener=opener)
+
+    with pytest.raises(OptimizerRequestError) as error:
+        client.advise("system", "user", OptimizerConfig(enabled=True))
+
+    assert error.value.error_code == error_code
+
+
+def test_invalid_provider_envelope_is_classified_without_retaining_body() -> None:
+    client = DeepSeekChatClient(
+        environ={"DEEPSEEK_API_KEY": "test-value"},
+        opener=lambda request, timeout: (200, b"not-json"),
+    )
+
+    with pytest.raises(OptimizerRequestError) as error:
+        client.advise("system", "user", OptimizerConfig(enabled=True))
+
+    assert error.value.error_code == "provider_response_invalid"

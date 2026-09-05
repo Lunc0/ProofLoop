@@ -74,13 +74,21 @@ def advise_after_evolution(
         return _result(
             run, optimizer, "unavailable", source=source, error_code="missing_api_key"
         )
-    except (OptimizerRequestError, OSError, TimeoutError):
+    except OptimizerRequestError as error:
         return _result(
-            run, optimizer, "model_failed", source=source, error_code="request_failed"
+            run, optimizer, "model_failed", source=source, error_code=error.error_code
+        )
+    except TimeoutError:
+        return _result(
+            run, optimizer, "model_failed", source=source, error_code="request_timeout"
+        )
+    except OSError:
+        return _result(
+            run, optimizer, "model_failed", source=source, error_code="network_error"
         )
     except Exception:
         return _result(
-            run, optimizer, "model_failed", source=source, error_code="request_failed"
+            run, optimizer, "model_failed", source=source, error_code="unexpected_error"
         )
     try:
         if (

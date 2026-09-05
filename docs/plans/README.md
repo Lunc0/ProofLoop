@@ -33,3 +33,4 @@
 | 24 | v0.22 | 已完成 | [Smoke 仅按通过数 Gate](24-v0.22-smoke-pass-count-only-gate.md) | [规格](../specs/24-v0.22-smoke-pass-count-only-gate.md) | [实现记录](../design/24-v0.22-smoke-pass-count-only-gate.md) |
 | 25 | v0.23 | 已完成 | [Smoke 2 Pass Gate](25-v0.23-smoke-two-pass-gate.md) | [规格](../specs/25-v0.23-smoke-two-pass-gate.md) | [实现记录](../design/25-v0.23-smoke-two-pass-gate.md) |
 | 26 | v0.24 | 已完成 | [Smoke 1 Pass Gate](26-v0.24-smoke-one-pass-gate.md) | [规格](../specs/26-v0.24-smoke-one-pass-gate.md) | [实现记录](../design/26-v0.24-smoke-one-pass-gate.md) |
+| 27 | v0.25 | 已完成 | [Optimizer Request Failure Codes](27-v0.25-optimizer-request-failure-codes.md) | [规格](../specs/27-v0.25-optimizer-request-failure-codes.md) | [实现记录](../design/27-v0.25-optimizer-request-failure-codes.md) |

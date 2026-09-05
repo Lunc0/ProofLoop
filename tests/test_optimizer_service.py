@@ -8,6 +8,7 @@ from pathlib import Path
 
 from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.optimizer.client import OptimizerClientResponse
+from skill_evolve.optimizer.deepseek import OptimizerRequestError
 from skill_evolve.optimizer.service import advise_after_evolution
 from skill_evolve.registry.store import RunDirectory, RunStore
 from skill_evolve.subject import RunSubject
@@ -33,6 +34,17 @@ class FakeOptimizerClient:
         del config
         self.calls.append((system_prompt, user_prompt))
         return OptimizerClientResponse(self.content)
+
+
+class FailingOptimizerClient:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def advise(
+        self, system_prompt: str, user_prompt: str, config: OptimizerConfig
+    ) -> OptimizerClientResponse:
+        del system_prompt, user_prompt, config
+        raise self._error
 
 
 def test_valid_evolution_input_writes_advice_without_raw_session(tmp_path: Path) -> None:
@@ -98,6 +110,32 @@ def test_unknown_evidence_case_in_model_advice_is_rejected(tmp_path: Path) -> No
 
     assert result.receipt.status == "invalid_response"
     assert not (run.path / "optimizer" / "advice.json").exists()
+
+
+def test_model_failure_receipt_uses_a_sanitized_request_code(tmp_path: Path) -> None:
+    for name, error, expected_code in (
+        ("provider", OptimizerRequestError("http_5xx"), "http_5xx"),
+        ("timeout", TimeoutError("not persisted"), "request_timeout"),
+        ("network", OSError("not persisted"), "network_error"),
+        ("unexpected", RuntimeError("not persisted"), "unexpected_error"),
+    ):
+        run = RunStore(tmp_path / name).create()
+        subject = _subject()
+        _write_input(run, subject)
+
+        result = advise_after_evolution(
+            run,
+            subject,
+            OptimizerConfig(enabled=True),
+            run_status="task_failure",
+            client=FailingOptimizerClient(error),
+        )
+
+        assert result.receipt.status == "model_failed"
+        assert result.receipt.error_code == expected_code
+        receipt_text = (run.path / "optimizer" / "receipt.json").read_text(encoding="utf-8")
+        assert expected_code in receipt_text
+        assert "not persisted" not in receipt_text
 
 
 def test_tampered_agent_input_skips_without_calling_client(tmp_path: Path) -> None:
