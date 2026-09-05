@@ -16,6 +16,7 @@ from skill_evolve.benchmark.livesqlbench import (
     LiveSQLBenchCase,
     evaluate_query_case,
     public_evaluation_dict,
+    synthetic_runner_error_case,
 )
 from skill_evolve.benchmark.livesqlbench_heldout import (
     HELDOUT_CASE_COUNT,
@@ -99,20 +100,24 @@ def run_heldout_dsh_suite(
                 environment_fingerprint,
                 subject,
             )
-        except (LiveSQLBenchFixtureError, RunnerError) as error:
+        except LiveSQLBenchFixtureError as error:
             return _finish_paused_run(
                 run,
                 suite,
                 environment_fingerprint,
                 tuple(evaluations),
-                f"live_fixture_or_runner_invalid: {type(error).__name__}",
+                f"live_fixture_invalid: {type(error).__name__}",
                 subject,
                 _elapsed_milliseconds(started_at),
             )
+        except RunnerError:
+            runner_case, evaluation = synthetic_runner_error_case(case)
+            execution = None
         evaluations.append(evaluation)
         runner_cases.append(runner_case)
-        _write_runner_artifacts(run, case.instance_id, execution)
-        if execution.stderr:
+        if execution is not None:
+            _write_runner_artifacts(run, case.instance_id, execution)
+        if execution is not None and execution.stderr:
             stderr_parts.append(f"[{case.instance_id}]\n{execution.stderr}")
 
     runner_output = RunnerOutput(schema_version="v1", cases=tuple(runner_cases))

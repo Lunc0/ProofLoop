@@ -96,8 +96,8 @@ uv run skill-evolve benchmark run `
 ```
 
 完整形成五条 evaluation 后，若至少 1/5 `passed`，Smoke 会为相同的被测对象写入 v2 gate receipt；其余 case 的
-`wrong_result`、timeout、`runner_invalid` 或 `evaluator_invalid` 不额外拒绝 gate。run status 仍如实保留；0/5
-及以下或少于五条 evaluation 都不会放行 Evolution。历史 `2/2/1` Smoke manifest 与 v1 gate
+`wrong_result`、timeout 或 runner error 都按一题失败、零个通过计入 evaluation，但不额外拒绝 gate。`evaluator_invalid`
+也不覆盖既有的通过数 Gate 语义。run status 仍如实保留；0/5 及以下或少于五条 evaluation 都不会放行 Evolution。历史 `2/2/1` Smoke manifest 与 v1 gate
 receipt 只保留审计用途，不能再运行或放行 Evolution。
 
 ### 创建并运行 Evolution
@@ -118,13 +118,13 @@ uv run skill-evolve benchmark run `
 
 如果预检/运行期只排除了部分 Gold 无效 case，run status 是 `partial_evaluator_invalid`：它不产生正式 macro score、
 cost 汇总或 comparison key，不能用于候选比较；但其余有效且失败 case 的脱敏轨迹仍可进入 Evolution 优化链路。
-若没有任何有效 case，仍是 `evaluator_invalid`；若有效 case 出现 `runner_invalid`，仍按全局 runner 故障停止。若部分无效
-但没有有效失败轨迹，cycle 会以 `no_optimizable_failure` 停止，不会调用优化 LLM。
+若没有任何有效 case，仍是 `evaluator_invalid`。runner error（无论是 case 输出状态还是受控 `RunnerError`）则作为一题错误
+保留在有效评测统计中，不会停止剩余 case、也不会产生 `runner_invalid` 或 `partial_runner_error`。若没有其他 evaluator 无效，
+包含 runner error 的完整 Evolution run 状态是 `task_failure`。
 
-Evolution 的单 case runner error 会被排除而不停止剩余 case，status 为 `partial_runner_error`（前提是仍有有效评测 case
-或可行动 timeout 轨迹）。DSH 明确超时且已有脱敏 session 成功压缩为可行动轨迹时，该轨迹可交给优化器以减少重复探索；无 session、
-不可压缩 timeout、进程退出或其他 runner 错误只被丢弃，不会进入优化器。它同样不是可比较的 benchmark 结果。Smoke 和 Final
-始终不放行任何 runner error。
+DSH 明确超时且已有脱敏 session 成功压缩为可行动轨迹时，该轨迹仍可交给优化器以减少重复探索；无 session、不可压缩 timeout、
+进程退出或 synthetic `RunnerError` 只计为错题，不会进入优化器。Smoke 和 Final 同样将 runner error 计为错题；Smoke 是否放行
+仍只取决于完整五题中的通过数。
 
 同一份既有 Evolution manifest 可以运行多个被测对象，或在 runner/evaluator 故障后用于审计重试；这不算新的
 题目暴露。普通 Smoke/Evolution 的脱敏 evidence 位于仓库的 `runs\<run-id>\`。未来优化 agent 如需诊断，

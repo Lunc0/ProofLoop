@@ -12,6 +12,7 @@ from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     RawArtifact,
     RunnerCaseOutput,
+    RunnerError,
     RunnerExecution,
     RunnerOutput,
 )
@@ -88,6 +89,16 @@ class StubDshRunner:
                 ),
             ),
         )
+
+
+class FirstRunnerErrorDshRunner(StubDshRunner):
+    call_count = 0
+
+    def run(self, input) -> RunnerExecution:
+        type(self).call_count += 1
+        if type(self).call_count == 1:
+            raise RunnerError("private runner failure")
+        return super().run(input)
 
 
 def test_automatic_run_writes_redacted_session_evidence_without_gt(tmp_path, monkeypatch) -> None:
@@ -167,3 +178,34 @@ def test_automatic_run_binds_verified_candidate_without_notices_or_gt(
     assert subject_input.read_bytes() == candidate.skill_bytes
     assert not (outcome.run.path / "inputs" / "NOTICE.md").exists()
     assert "private gold" not in (outcome.run.path / "result.json").read_text(encoding="utf-8")
+
+
+def test_runner_exception_is_counted_as_wrong_and_does_not_stop_base_lite(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    FirstRunnerErrorDshRunner.call_count = 0
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", FirstRunnerErrorDshRunner
+    )
+
+    outcome = run_base_lite_dsh(
+        _write_base_lite_fixture(tmp_path / "data"),
+        DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh"),
+        None,
+        ModelConfig(provider="test", name="stub"),
+        tmp_path / "runs",
+    )
+
+    assert FirstRunnerErrorDshRunner.call_count == 5
+    assert outcome.attribution.status.value == "needs_skill_change"
+    assert len(outcome.evaluations) == 5
+    assert outcome.evaluations[0].verdict.value == "runner_error"
+    assert outcome.evaluations[0].candidate_sql is None
+    assert (outcome.run.path / "raw" / "runner-output.json").is_file()
+    result = json.loads((outcome.run.path / "result.json").read_text(encoding="utf-8"))
+    assert result["summary"] == {"pass": 4, "runner_error": 1}
+    assert "private runner failure" not in json.dumps(result)

@@ -17,6 +17,7 @@ from skill_evolve.benchmark.livesqlbench import (
     LiveSQLBenchCase,
     LiveSQLBenchSuite,
     public_evaluation_dict,
+    synthetic_runner_error_case,
 )
 from skill_evolve.benchmark.livesqlbench_rotation import (
     ROTATION_TIERS,
@@ -59,10 +60,8 @@ from skill_evolve.trajectory.contracts import CompressedTrajectory
 RollingRunStatus = Literal[
     "passed",
     "task_failure",
-    "runner_invalid",
     "evaluator_invalid",
     "partial_evaluator_invalid",
-    "partial_runner_error",
 ]
 SMOKE_MINIMUM_PASSED_CASES: Literal[1] = 1
 
@@ -117,13 +116,12 @@ class RotationRunOutcome:
     public_result: dict[str, Any]
     evaluable_case_count: int | None = None
     discarded_evaluator_invalid_count: int | None = None
-    discarded_runner_error_count: int | None = None
     actionable_timeout_count: int | None = None
     optimizable_failure_count: int | None = None
 
     @property
     def exit_code(self) -> int:
-        return 2 if self.status in {"runner_invalid", "evaluator_invalid"} else 0
+        return 2 if self.status == "evaluator_invalid" else 0
 
 
 @dataclass(frozen=True)
@@ -173,7 +171,6 @@ def run_rotation_dsh_suite(
     infrastructure_status: RollingRunStatus | None = None
     preflight: _EvolutionPreflight | None = None
     discarded_evaluator_invalid_count = 0
-    discarded_runner_error_count = 0
     actionable_timeout_count = 0
 
     if suite.kind == "evolution":
@@ -220,18 +217,34 @@ def run_rotation_dsh_suite(
             infrastructure_status = "evaluator_invalid"
             break
         except RunnerError:
-            if suite.kind == "evolution":
-                discarded_runner_error_count += 1
-                continue
-            infrastructure_status = "runner_invalid"
-            break
+            runner_case, evaluation = synthetic_runner_error_case(case)
+            execution = None
         if suite.kind == "evolution" and evaluation.verdict is Verdict.EVALUATOR_INVALID:
             discarded_evaluator_invalid_count += 1
             continue
-        if suite.kind == "evolution" and evaluation.verdict is Verdict.RUNNER_ERROR:
-            discarded_runner_error_count += 1
+        evaluations.append(evaluation)
+        runner_cases.append(runner_case)
+        trajectories.append(_public_trajectory(runner_case))
+        if execution is not None:
             _write_runner_artifacts(run, case, execution)
-            if _is_timeout_case(runner_case):
+        if suite.kind == "evolution" and not evaluation.passed:
+            if evaluation.verdict is Verdict.RUNNER_ERROR:
+                if execution is None:
+                    omitted_agent_cases.append(
+                        {"case_id": case.instance_id, "reason": "runner_execution_missing"}
+                    )
+                elif _is_timeout_case(runner_case):
+                    compressed, omission = _compress_evolution_case(
+                        runner_case, execution, evaluation, dsh_config.timeout_ms
+                    )
+                    if compressed is None:
+                        assert omission is not None
+                        omitted_agent_cases.append(omission)
+                    else:
+                        agent_cases.append((case, compressed))
+                        actionable_timeout_count += 1
+            else:
+                assert execution is not None
                 compressed, omission = _compress_evolution_case(
                     runner_case, execution, evaluation, dsh_config.timeout_ms
                 )
@@ -240,22 +253,7 @@ def run_rotation_dsh_suite(
                     omitted_agent_cases.append(omission)
                 else:
                     agent_cases.append((case, compressed))
-                    actionable_timeout_count += 1
-            continue
-        evaluations.append(evaluation)
-        runner_cases.append(runner_case)
-        trajectories.append(_public_trajectory(runner_case))
-        _write_runner_artifacts(run, case, execution)
-        if suite.kind == "evolution" and not evaluation.passed:
-            compressed, omission = _compress_evolution_case(
-                runner_case, execution, evaluation, dsh_config.timeout_ms
-            )
-            if compressed is None:
-                assert omission is not None
-                omitted_agent_cases.append(omission)
-            else:
-                agent_cases.append((case, compressed))
-        if execution.stderr:
+        if execution is not None and execution.stderr:
             stderr_parts.append(f"[{case.instance_id}]\n{execution.stderr}")
 
     if runner_cases:
@@ -279,13 +277,11 @@ def run_rotation_dsh_suite(
         infrastructure_status,
         suite.kind,
         discarded_evaluator_invalid_count,
-        discarded_runner_error_count,
-        actionable_timeout_count,
     )
     comparison_key = (
         _comparison_key(suite, dsh_config, model)
         if suite.kind == "evolution"
-        and status not in {"partial_evaluator_invalid", "partial_runner_error"}
+        and status != "partial_evaluator_invalid"
         else None
     )
     optimizer_result: OptimizationResult | None = None
@@ -308,7 +304,6 @@ def run_rotation_dsh_suite(
         optimizer_result,
         discarded_evaluator_invalid_count if suite.kind == "evolution" else None,
         len(evaluations) if suite.kind == "evolution" else None,
-        discarded_runner_error_count if suite.kind == "evolution" else None,
         actionable_timeout_count if suite.kind == "evolution" else None,
         len(agent_cases) if suite.kind == "evolution" else None,
     )
@@ -493,18 +488,10 @@ def _status_for(
     infrastructure_status: RollingRunStatus | None,
     kind: str,
     discarded_evaluator_invalid_count: int,
-    discarded_runner_error_count: int,
-    actionable_timeout_count: int,
 ) -> RollingRunStatus:
     if infrastructure_status is not None:
         return infrastructure_status
     verdicts = {evaluation.verdict for evaluation in evaluations}
-    if kind == "evolution" and discarded_runner_error_count > 0:
-        if evaluations or actionable_timeout_count > 0:
-            return "partial_runner_error"
-        return "runner_invalid"
-    if Verdict.RUNNER_ERROR in verdicts:
-        return "runner_invalid"
     if kind == "evolution" and discarded_evaluator_invalid_count > 0:
         if not evaluations:
             return "evaluator_invalid"
@@ -574,7 +561,6 @@ def _write_final_evidence(
     optimizer_result: OptimizationResult | None,
     discarded_evaluator_invalid_count: int | None,
     evaluable_case_count: int | None,
-    discarded_runner_error_count: int | None,
     actionable_timeout_count: int | None,
     optimizable_failure_count: int | None,
 ) -> RotationRunOutcome:
@@ -608,10 +594,6 @@ def _write_final_evidence(
         result["runner_timeout"] = {
             "actionable_timeout_count": actionable_timeout_count,
         }
-    if discarded_runner_error_count is not None:
-        result["runner_error"] = {
-            "discarded_runner_error_count": discarded_runner_error_count,
-        }
     if comparison_key is not None:
         result["comparison_key"] = comparison_key
     if optimizer_result is not None:
@@ -635,7 +617,6 @@ def _write_final_evidence(
         public_result=result,
         evaluable_case_count=evaluable_case_count,
         discarded_evaluator_invalid_count=discarded_evaluator_invalid_count,
-        discarded_runner_error_count=discarded_runner_error_count,
         actionable_timeout_count=actionable_timeout_count,
         optimizable_failure_count=optimizable_failure_count,
     )

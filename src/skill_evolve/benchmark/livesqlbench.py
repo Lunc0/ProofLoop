@@ -260,6 +260,32 @@ def evaluate_query_case(
     return _evaluation(case, runner_case, Verdict.PASS, None, usage)
 
 
+def synthetic_runner_error_case(
+    case: LiveSQLBenchCase,
+) -> tuple[RunnerCaseOutput, CaseEvaluation]:
+    """Represent a runner exception as a minimal, failed case result.
+
+    The runner did not provide an output to persist, so the synthetic record
+    deliberately contains no candidate SQL, exception detail, execution
+    artifacts, or usage.  It only lets the benchmark count this selected case
+    as an incorrect answer.
+    """
+
+    runner_case = RunnerCaseOutput(
+        case_id=case.instance_id,
+        status="runner_error",
+        trajectory=(),
+    )
+    evaluation = _evaluation(
+        case,
+        runner_case,
+        Verdict.RUNNER_ERROR,
+        "runner failed before returning a case output",
+        runner_case.usage.model_dump(mode="json"),
+    )
+    return runner_case, evaluation
+
+
 def public_evaluation_dict(evaluation: CaseEvaluation) -> dict[str, Any]:
     """Produce a serialisable verdict without gold SQL or gold execution results."""
 

@@ -35,16 +35,16 @@ class Attribution:
 
 
 def attribute(evaluations: tuple[CaseEvaluation, ...]) -> Attribution:
-    """Prefer pausing on evaluator/runner evidence defects over blaming a Skill."""
+    """Pause only on evaluator evidence defects before suggesting Skill work."""
 
     eval_data = tuple(
         evaluation
         for evaluation in evaluations
-        if evaluation.verdict in {Verdict.EVALUATOR_INVALID, Verdict.RUNNER_ERROR}
+        if evaluation.verdict is Verdict.EVALUATOR_INVALID
     )
     if eval_data:
         return _eval_data_attribution(
-            reason="evaluator_or_runner_evidence_invalid",
+            reason="evaluator_evidence_invalid",
             case_ids=tuple(evaluation.case_id for evaluation in eval_data),
             verdicts=tuple(evaluation.verdict.value for evaluation in eval_data),
         )

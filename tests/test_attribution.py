@@ -33,3 +33,10 @@ def test_candidate_sql_failure_requires_skill_change() -> None:
 
     assert result.kind is AttributionKind.SKILL
     assert result.status is RunStatus.NEEDS_SKILL_CHANGE
+
+
+def test_runner_error_requires_skill_change() -> None:
+    result = attribute((_evaluation(Verdict.RUNNER_ERROR),))
+
+    assert result.kind is AttributionKind.SKILL
+    assert result.status is RunStatus.NEEDS_SKILL_CHANGE

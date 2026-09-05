@@ -33,6 +33,7 @@ from skill_evolve.runner.contracts import (
     AgentExecution,
     RawArtifact,
     RunnerCaseOutput,
+    RunnerError,
     RunnerExecution,
     RunnerOutput,
 )
@@ -252,6 +253,16 @@ class UnrecoverableRunnerErrorStubDshRunner(PassingStubDshRunner):
         )
 
 
+class RaisingRunnerErrorStubDshRunner(PassingStubDshRunner):
+    call_count = 0
+
+    def run(self, input) -> RunnerExecution:
+        type(self).call_count += 1
+        if type(self).call_count == 1:
+            raise RunnerError("runner error detail must not be persisted")
+        return super().run(input)
+
+
 class MixedTaskFailureAndRunnerErrorStubDshRunner(PassingStubDshRunner):
     call_count = 0
 
@@ -354,7 +365,7 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     timeout_input = (timeout.run.path / "agent-input" / "trajectory.json").read_text(
         encoding="utf-8"
     )
-    assert timeout.status == "partial_runner_error"
+    assert timeout.status == "task_failure"
     assert '"trace_completeness":"partial_actionable"' in timeout_input
     assert '"runner_outcome":"timeout"' in timeout_input
 
@@ -510,7 +521,7 @@ def test_smoke_gate_requires_v2_evidence_and_at_least_one_pass(
     invalid = run_rotation_dsh_suite(
         smoke_suite, dsh_config, None, model, tmp_path / "runs", invalid_subject
     )
-    assert invalid.status == "runner_invalid"
+    assert invalid.status == "task_failure"
     assert not has_successful_smoke_gate(smoke_suite.custody, invalid_subject)
 
 
@@ -533,7 +544,7 @@ def test_smoke_gate_uses_pass_count_when_all_five_evaluations_exist(
     timeout_outcome = run_rotation_dsh_suite(
         smoke_suite, dsh_config, None, model, tmp_path / "runs", timeout_subject
     )
-    assert timeout_outcome.status == "runner_invalid"
+    assert timeout_outcome.status == "task_failure"
     assert len(timeout_outcome.evaluations) == 5
     assert has_successful_smoke_gate(smoke_suite.custody, timeout_subject)
 
@@ -669,7 +680,7 @@ def test_enabled_optimizer_uses_actionable_timeout_evidence(
         allow_ungated_evolution=True,
     )
 
-    assert outcome.status == "partial_runner_error"
+    assert outcome.status == "task_failure"
     assert outcome.actionable_timeout_count == len(evolution_suite.cases)
     assert len(fake.calls) == 1
     assert outcome.public_result["optimizer"]["status"] == "proposed"
@@ -705,8 +716,10 @@ def test_enabled_optimizer_ignores_unusable_runner_errors_with_valid_failures(
         allow_ungated_evolution=True,
     )
 
-    assert outcome.status == "partial_runner_error"
-    assert outcome.discarded_runner_error_count == len(evolution_suite.cases) // 2
+    assert outcome.status == "task_failure"
+    assert outcome.public_result["summary"]["verdicts"]["runner_error"] == (
+        len(evolution_suite.cases) // 2
+    )
     assert outcome.optimizable_failure_count == (len(evolution_suite.cases) + 1) // 2
     assert len(fake.calls) == 1
 
@@ -800,7 +813,7 @@ def test_evolution_with_no_valid_gold_case_never_starts_dsh(
     assert outcome.discarded_evaluator_invalid_count == len(evolution_suite.cases)
 
 
-def test_evolution_stops_when_runner_errors_leave_no_valid_evidence(
+def test_evolution_counts_runner_errors_when_evaluator_excludes_a_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
@@ -829,8 +842,45 @@ def test_evolution_stops_when_runner_errors_leave_no_valid_evidence(
         allow_ungated_evolution=True,
     )
 
-    assert outcome.status == "runner_invalid"
+    assert outcome.status == "partial_evaluator_invalid"
     assert outcome.discarded_evaluator_invalid_count == 1
+    assert len(outcome.evaluations) == len(evolution_suite.cases) - 1
+    assert outcome.public_result["summary"]["verdicts"]["runner_error"] == (
+        len(evolution_suite.cases) - 1
+    )
+
+
+def test_smoke_continues_after_runner_exception_and_counts_it_as_wrong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke_suite, _ = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    RaisingRunnerErrorStubDshRunner.call_count = 0
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", RaisingRunnerErrorStubDshRunner
+    )
+
+    outcome = run_rotation_dsh_suite(
+        smoke_suite,
+        DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh"),
+        None,
+        ModelConfig(provider="test", name="stub"),
+        tmp_path / "runs",
+        _subject("runner-exception"),
+    )
+
+    assert RaisingRunnerErrorStubDshRunner.call_count == len(smoke_suite.cases)
+    assert outcome.status == "task_failure"
+    assert len(outcome.evaluations) == len(smoke_suite.cases)
+    assert outcome.evaluations[0].verdict is Verdict.RUNNER_ERROR
+    assert outcome.evaluations[0].candidate_sql is None
+    assert outcome.evaluations[0].detail == "runner failed before returning a case output"
+    assert outcome.public_result["tiers"]["Simple"]["evaluated_count"] == 3
+    result_text = (outcome.run.path / "result.json").read_text(encoding="utf-8")
+    assert "runner error detail" not in result_text
 
 
 def test_evolution_discards_runtime_evaluator_invalid_case(

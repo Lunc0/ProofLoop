@@ -22,12 +22,14 @@ from skill_evolve.benchmark.contracts import BenchmarkAdapterError
 from skill_evolve.benchmark.livesqlbench_heldout_adapter import (
     LiveSQLBenchBaseLiteHeldOutAdapter,
 )
+from skill_evolve.benchmark.livesqlbench_heldout_run import run_heldout_dsh_suite
 from skill_evolve.cli import app
 from skill_evolve.config.models import DshConfig, ModelConfig
 from skill_evolve.runner.contracts import (
     RawArtifact,
     RunInput,
     RunnerCaseOutput,
+    RunnerError,
     RunnerExecution,
     RunnerOutput,
 )
@@ -103,6 +105,16 @@ class StubDshRunner:
                 ),
             ),
         )
+
+
+class FirstRunnerErrorDshRunner(StubDshRunner):
+    call_count = 0
+
+    def run(self, run_input: RunInput) -> RunnerExecution:
+        type(self).call_count += 1
+        if type(self).call_count == 1:
+            raise RunnerError("private held-out runner failure")
+        return super().run(run_input)
 
 
 def test_initialisation_creates_one_immutable_non_public_manifest(
@@ -338,6 +350,58 @@ def test_heldout_run_keeps_case_evidence_in_custody_and_returns_only_aggregates(
     assert "simple_db00" not in cli_result.stdout
     assert "candidate_sql" not in cli_result.stdout
     assert str(custody_root) not in cli_result.stdout
+
+
+def test_heldout_runner_exception_is_counted_and_does_not_stop_the_suite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_heldout_run.LiveSQLBenchFixture", StubFixture
+    )
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_heldout_run.ReadOnlyQueryService",
+        StubQueryService,
+    )
+    FirstRunnerErrorDshRunner.call_count = 0
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_heldout_run.DshRunner", FirstRunnerErrorDshRunner
+    )
+    data_root = _write_final_suite_fixture(tmp_path / "data")
+    custody_root = tmp_path / "custody"
+    custody_root.mkdir()
+    session_root = custody_root / "dsh-session-logs"
+    session_root.mkdir()
+    monkeypatch.setenv(HELDOUT_ROOT_ENVIRONMENT_VARIABLE, str(custody_root))
+    initialise_heldout_manifest(
+        data_root,
+        repository_root=Path.cwd(),
+        candidate_store_root=Path.cwd() / ".local" / "skill-evolve",
+    )
+    suite = load_heldout_suite(
+        data_root,
+        repository_root=Path.cwd(),
+        candidate_store_root=Path.cwd() / ".local" / "skill-evolve",
+    )
+
+    outcome = run_heldout_dsh_suite(
+        suite,
+        DshConfig(
+            version="0.1.1-rc.2",
+            profile="headless",
+            runner="dsh",
+            session_log_root=str(session_root),
+        ),
+        None,
+        ModelConfig(provider="test", name="stub"),
+    )
+
+    assert FirstRunnerErrorDshRunner.call_count == 30
+    assert outcome.attribution.status.value == "needs_skill_change"
+    assert len(outcome.evaluations) == 30
+    assert outcome.public_result["status"] == "needs_skill_change"
+    assert outcome.public_result["tiers"]["Simple"]["evaluated_count"] == 10
+    assert outcome.public_result["tiers"]["Simple"]["passed_count"] == 9
+    assert "private held-out runner failure" not in json.dumps(outcome.public_result)
 
 
 def _write_final_suite_fixture(tmp_path: Path, database_count: int = 18) -> Path:

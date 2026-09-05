@@ -106,7 +106,7 @@ class _RotationAdapter:
             status=outcome.status,
             attribution=(
                 "infrastructure"
-                if outcome.status in {"runner_invalid", "evaluator_invalid"}
+                if outcome.status == "evaluator_invalid"
                 else "none"
             ),
             report_path=outcome.run.path / "report.md",
