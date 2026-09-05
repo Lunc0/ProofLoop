@@ -95,9 +95,9 @@ uv run skill-evolve benchmark run `
   --manifest <smoke-manifest-id> --candidate <candidate-id>
 ```
 
-完整执行五题后，若至少 3/5 `passed` 且没有 `runner_invalid` 或 `evaluator_invalid`，Smoke 会为相同的被测对象
-写入 v2 gate receipt。3/5 或 4/5 的 run status 仍会如实记为 `task_failure`，但 receipt 会记录实际通过数与门槛；2/5
-及以下、`runner_invalid` 或 `evaluator_invalid` 都不会放行 Evolution。历史 `2/2/1` Smoke manifest 与 v1 gate
+完整形成五条 evaluation 后，若至少 1/5 `passed`，Smoke 会为相同的被测对象写入 v2 gate receipt；其余 case 的
+`wrong_result`、timeout、`runner_invalid` 或 `evaluator_invalid` 不额外拒绝 gate。run status 仍如实保留；0/5
+及以下或少于五条 evaluation 都不会放行 Evolution。历史 `2/2/1` Smoke manifest 与 v1 gate
 receipt 只保留审计用途，不能再运行或放行 Evolution。
 
 ### 创建并运行 Evolution
@@ -189,7 +189,7 @@ Final 的 run evidence 位于 `D:\skill-evolve-evaluator\heldout\runs\`，完整
 | --- | --- | --- | --- |
 | 固定五题 | `livesqlbench-base-lite` | 无 | 可选 |
 | 滚动 Smoke | `livesqlbench-base-lite-smoke-rotation-v1` | `SKILL_EVOLVE_ROTATION_ROOT`、`--manifest` 与 `--candidate` | 必须 |
-| 滚动 Evolution | `livesqlbench-base-lite-evolution-v1` | 当前 v2 Smoke 3/5 gate、`SKILL_EVOLVE_ROTATION_ROOT`、`--manifest` 与 `--candidate` | 必须 |
+| 滚动 Evolution | `livesqlbench-base-lite-evolution-v1` | 当前 v2 Smoke 1/5 gate、`SKILL_EVOLVE_ROTATION_ROOT`、`--manifest` 与 `--candidate` | 必须 |
 | Final 三十题 | `livesqlbench-base-lite-query-final-v1` | 先执行 `enter-heldout.ps1` | 可选 |
 
 关于 Final custody 创建、DSH provider route 和独立复现实例，另见

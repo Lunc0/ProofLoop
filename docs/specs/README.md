@@ -30,3 +30,6 @@
 | 21 | v0.19 | 已完成 | [紧凑 SkillMap 与短编辑锚点](21-v0.19-compact-skill-map.md) | [实施计划](../plans/21-v0.19-compact-skill-map.md) | [实现记录](../design/21-v0.19-compact-skill-map.md) |
 | 22 | v0.20 | 已完成 | [EditPlan 位置语义与问题-变更分层](22-next-edit-plan-location-semantics.md) | [实施计划](../plans/22-v0.20-edit-plan-location-semantics.md) | [实现记录](../design/22-v0.20-edit-plan-location-semantics.md) |
 | 23 | v0.21 | 已完成 | [层级 Markdown SkillMap 与整块替换 EditPlan](23-v0.21-hierarchical-markdown-skill-map.md) | [实施计划](../plans/23-v0.21-hierarchical-markdown-skill-map.md) | [实现记录](../design/23-v0.21-hierarchical-markdown-skill-map.md) |
+| 24 | v0.22 | 已完成 | [Smoke 仅按通过数 Gate](24-v0.22-smoke-pass-count-only-gate.md) | [实施计划](../plans/24-v0.22-smoke-pass-count-only-gate.md) | [实现记录](../design/24-v0.22-smoke-pass-count-only-gate.md) |
+| 25 | v0.23 | 已完成 | [Smoke 2 Pass Gate](25-v0.23-smoke-two-pass-gate.md) | [实施计划](../plans/25-v0.23-smoke-two-pass-gate.md) | [实现记录](../design/25-v0.23-smoke-two-pass-gate.md) |
+| 26 | v0.24 | 已完成 | [Smoke 1 Pass Gate](26-v0.24-smoke-one-pass-gate.md) | [实施计划](../plans/26-v0.24-smoke-one-pass-gate.md) | [实现记录](../design/26-v0.24-smoke-one-pass-gate.md) |

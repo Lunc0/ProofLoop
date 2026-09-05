@@ -64,7 +64,7 @@ RollingRunStatus = Literal[
     "partial_evaluator_invalid",
     "partial_runner_error",
 ]
-SMOKE_MINIMUM_PASSED_CASES: Literal[3] = 3
+SMOKE_MINIMUM_PASSED_CASES: Literal[1] = 1
 
 
 class RotationRunError(RuntimeError):
@@ -90,7 +90,7 @@ class SmokeGateReceipt(StrictRotationModel):
     smoke_environment_fingerprint: str
     passed_case_count: int
     case_count: Literal[5]
-    minimum_passed_case_count: Literal[3, 4]
+    minimum_passed_case_count: Literal[1, 2, 3, 4]
     gate_sha256: str
 
     @model_validator(mode="after")
@@ -458,7 +458,7 @@ def _write_evolution_agent_input(
 
 
 def has_successful_smoke_gate(custody: RotationCustody, subject: RunSubject) -> bool:
-    """Return whether custody contains a verified v2 3/5 Smoke receipt for the subject."""
+    """Return whether custody contains a verified v2 1/5 Smoke receipt for the subject."""
 
     root = custody.gate_root
     if not root.exists():
@@ -519,7 +519,8 @@ def _status_for(
 def meets_smoke_gate_policy(
     status: RollingRunStatus, evaluations: tuple[CaseEvaluation, ...]
 ) -> bool:
-    if status not in {"passed", "task_failure"} or len(evaluations) != SMOKE_CASE_COUNT:
+    del status
+    if len(evaluations) != SMOKE_CASE_COUNT:
         return False
     passed_case_count = sum(item.passed for item in evaluations)
     return SMOKE_MINIMUM_PASSED_CASES <= passed_case_count <= SMOKE_CASE_COUNT

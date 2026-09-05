@@ -48,6 +48,13 @@ class StubExecutor:
         return QueryExecution(result=QueryResult(columns=("value",), rows=((1,),)))
 
 
+@dataclass
+class FailingExecutor:
+    def execute_read_only(self, query: str) -> QueryExecution:
+        del query
+        return QueryExecution(error="trusted fixture test failure")
+
+
 class StubFixture:
     def __init__(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
@@ -61,6 +68,21 @@ class StubFixture:
     def for_database(self, database_name: str) -> StubExecutor:
         assert database_name.startswith("db")
         return StubExecutor()
+
+
+class SelectiveRuntimeFixture(StubFixture):
+    passing_case_count = 3
+    case_count = 0
+
+    def __enter__(self) -> SelectiveRuntimeFixture:
+        type(self).case_count += 1
+        return self
+
+    def for_database(self, database_name: str) -> StubExecutor | FailingExecutor:
+        assert database_name.startswith("db")
+        if type(self).case_count <= type(self).passing_case_count:
+            return StubExecutor()
+        return FailingExecutor()
 
 
 class SelectivePreflightExecutor:
@@ -251,6 +273,17 @@ class PartialSmokeStubDshRunner(PassingStubDshRunner):
         return TaskFailureStubDshRunner().run(input)
 
 
+class PartialTimeoutSmokeStubDshRunner(PassingStubDshRunner):
+    passed_case_count = 3
+    call_count = 0
+
+    def run(self, input) -> RunnerExecution:
+        type(self).call_count += 1
+        if type(self).call_count <= type(self).passed_case_count:
+            return super().run(input)
+        return TimeoutStubDshRunner().run(input)
+
+
 def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -345,7 +378,7 @@ def test_smoke_gate_controls_evolution_and_metrics_are_neutral(
         )
 
 
-def test_smoke_gate_requires_v2_evidence_and_at_least_three_passes(
+def test_smoke_gate_requires_v2_evidence_and_at_least_one_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     smoke_suite, evolution_suite = _prepare_suites(tmp_path, monkeypatch)
@@ -357,45 +390,45 @@ def test_smoke_gate_requires_v2_evidence_and_at_least_three_passes(
     model = ModelConfig(provider="test", name="stub")
 
     PartialSmokeStubDshRunner.call_count = 0
-    PartialSmokeStubDshRunner.passed_case_count = 3
+    PartialSmokeStubDshRunner.passed_case_count = 1
     monkeypatch.setattr(
         "skill_evolve.benchmark.livesqlbench_run.DshRunner", PartialSmokeStubDshRunner
     )
-    three_of_five_subject = _subject("three-of-five")
-    three_of_five = run_rotation_dsh_suite(
-        smoke_suite, dsh_config, None, model, tmp_path / "runs", three_of_five_subject
+    one_of_five_subject = _subject("one-of-five")
+    one_of_five = run_rotation_dsh_suite(
+        smoke_suite, dsh_config, None, model, tmp_path / "runs", one_of_five_subject
     )
-    assert three_of_five.status == "task_failure"
-    assert has_successful_smoke_gate(smoke_suite.custody, three_of_five_subject)
+    assert one_of_five.status == "task_failure"
+    assert has_successful_smoke_gate(smoke_suite.custody, one_of_five_subject)
     receipts = list(smoke_suite.custody.gate_root.glob("*.json"))
     receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
     assert receipt["schema_version"] == "v2"
-    assert receipt["passed_case_count"] == 3
+    assert receipt["passed_case_count"] == 1
     assert receipt["case_count"] == 5
-    assert receipt["minimum_passed_case_count"] == 3
+    assert receipt["minimum_passed_case_count"] == 1
 
     monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.DshRunner", PassingStubDshRunner)
     assert (
         run_rotation_dsh_suite(
-            evolution_suite, dsh_config, None, model, tmp_path / "runs", three_of_five_subject
+            evolution_suite, dsh_config, None, model, tmp_path / "runs", one_of_five_subject
         ).status
         == "passed"
     )
 
     PartialSmokeStubDshRunner.call_count = 0
-    PartialSmokeStubDshRunner.passed_case_count = 2
+    PartialSmokeStubDshRunner.passed_case_count = 0
     monkeypatch.setattr(
         "skill_evolve.benchmark.livesqlbench_run.DshRunner", PartialSmokeStubDshRunner
     )
-    two_of_five_subject = _subject("two-of-five")
-    two_of_five = run_rotation_dsh_suite(
-        smoke_suite, dsh_config, None, model, tmp_path / "runs", two_of_five_subject
+    zero_of_five_subject = _subject("zero-of-five")
+    zero_of_five = run_rotation_dsh_suite(
+        smoke_suite, dsh_config, None, model, tmp_path / "runs", zero_of_five_subject
     )
-    assert two_of_five.status == "task_failure"
-    assert not has_successful_smoke_gate(smoke_suite.custody, two_of_five_subject)
+    assert zero_of_five.status == "task_failure"
+    assert not has_successful_smoke_gate(smoke_suite.custody, zero_of_five_subject)
     with pytest.raises(RotationRunError, match="successful Smoke gate"):
         run_rotation_dsh_suite(
-            evolution_suite, dsh_config, None, model, tmp_path / "runs", two_of_five_subject
+            evolution_suite, dsh_config, None, model, tmp_path / "runs", zero_of_five_subject
         )
 
     legacy_subject = _subject("legacy")
@@ -432,6 +465,46 @@ def test_smoke_gate_requires_v2_evidence_and_at_least_three_passes(
     )
     assert has_successful_smoke_gate(smoke_suite.custody, historical_v2_subject)
 
+    historical_three_subject = _subject("historical-v2-three")
+    historical_three_payload = {
+        "schema_version": "v2",
+        "subject": historical_three_subject.public_binding(),
+        "smoke_manifest_sha256": "e" * 64,
+        "smoke_environment_fingerprint": "f" * 64,
+        "passed_case_count": 3,
+        "case_count": 5,
+        "minimum_passed_case_count": 3,
+    }
+    historical_three_payload["gate_sha256"] = hashlib.sha256(
+        json.dumps(historical_three_payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    (smoke_suite.custody.gate_root / "historical-v2-three.json").write_text(
+        json.dumps(historical_three_payload, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    assert has_successful_smoke_gate(smoke_suite.custody, historical_three_subject)
+
+    historical_two_subject = _subject("historical-v2-two")
+    historical_two_payload = {
+        "schema_version": "v2",
+        "subject": historical_two_subject.public_binding(),
+        "smoke_manifest_sha256": "1" * 64,
+        "smoke_environment_fingerprint": "2" * 64,
+        "passed_case_count": 2,
+        "case_count": 5,
+        "minimum_passed_case_count": 2,
+    }
+    historical_two_payload["gate_sha256"] = hashlib.sha256(
+        json.dumps(historical_two_payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    (smoke_suite.custody.gate_root / "historical-v2-two.json").write_text(
+        json.dumps(historical_two_payload, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    assert has_successful_smoke_gate(smoke_suite.custody, historical_two_subject)
+
     monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.DshRunner", TimeoutStubDshRunner)
     invalid_subject = _subject("invalid")
     invalid = run_rotation_dsh_suite(
@@ -439,6 +512,43 @@ def test_smoke_gate_requires_v2_evidence_and_at_least_three_passes(
     )
     assert invalid.status == "runner_invalid"
     assert not has_successful_smoke_gate(smoke_suite.custody, invalid_subject)
+
+
+def test_smoke_gate_uses_pass_count_when_all_five_evaluations_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke_suite, _ = _prepare_suites(tmp_path, monkeypatch)
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", StubFixture)
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.ReadOnlyQueryService", StubQueryService
+    )
+    dsh_config = DshConfig(version="0.1.1-rc.2", profile="headless", runner="dsh")
+    model = ModelConfig(provider="test", name="stub")
+
+    PartialTimeoutSmokeStubDshRunner.call_count = 0
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.DshRunner", PartialTimeoutSmokeStubDshRunner
+    )
+    timeout_subject = _subject("three-pass-timeout")
+    timeout_outcome = run_rotation_dsh_suite(
+        smoke_suite, dsh_config, None, model, tmp_path / "runs", timeout_subject
+    )
+    assert timeout_outcome.status == "runner_invalid"
+    assert len(timeout_outcome.evaluations) == 5
+    assert has_successful_smoke_gate(smoke_suite.custody, timeout_subject)
+
+    SelectiveRuntimeFixture.case_count = 0
+    monkeypatch.setattr(
+        "skill_evolve.benchmark.livesqlbench_run.LiveSQLBenchFixture", SelectiveRuntimeFixture
+    )
+    monkeypatch.setattr("skill_evolve.benchmark.livesqlbench_run.DshRunner", PassingStubDshRunner)
+    evaluator_subject = _subject("three-pass-evaluator-invalid")
+    evaluator_outcome = run_rotation_dsh_suite(
+        smoke_suite, dsh_config, None, model, tmp_path / "runs", evaluator_subject
+    )
+    assert evaluator_outcome.status == "evaluator_invalid"
+    assert len(evaluator_outcome.evaluations) == 5
+    assert has_successful_smoke_gate(smoke_suite.custody, evaluator_subject)
 
 
 def test_explicit_ungated_evolution_is_limited_to_the_internal_cycle_path(
