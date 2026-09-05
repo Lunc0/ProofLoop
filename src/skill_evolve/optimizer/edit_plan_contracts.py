@@ -815,7 +815,8 @@ class EditPlanReceipt(StrictEditPlanModel):
         "skill-edit-plan-prompt-v3",
         "skill-edit-plan-prompt-v4",
         "skill-edit-plan-prompt-v5",
-    ] = "skill-edit-plan-prompt-v5"
+        "skill-edit-plan-prompt-v6",
+    ] = "skill-edit-plan-prompt-v6"
     source: EditPlanSource | None = None
     plan_sha256: str | None = None
     skill_map_sha256: str | None = None

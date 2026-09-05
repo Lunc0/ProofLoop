@@ -213,7 +213,7 @@ def test_receipt_keeps_prior_prompts_readable_and_defaults_new_plans_to_v3() -> 
     assert historical_v2.prompt_version == "skill-edit-plan-prompt-v2"
     assert historical_v3.prompt_version == "skill-edit-plan-prompt-v3"
     assert current.model == "deepseek-v4-flash-0731"
-    assert current.prompt_version == "skill-edit-plan-prompt-v5"
+    assert current.prompt_version == "skill-edit-plan-prompt-v6"
 
 
 def _cluster(

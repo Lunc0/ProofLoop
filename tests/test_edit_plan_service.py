@@ -35,7 +35,7 @@ def test_v2_plan_writes_compact_map_and_replace_artifacts(tmp_path: Path) -> Non
     result = _plan(run, subject, client)
 
     assert result.receipt.status == "proposed"
-    assert result.receipt.prompt_version == "skill-edit-plan-prompt-v5"
+    assert result.receipt.prompt_version == "skill-edit-plan-prompt-v6"
     artifact_dir = run.path / "optimizer" / "edit-plan"
     skill_map = json.loads((artifact_dir / "skill-map.json").read_text(encoding="utf-8"))
     plan = json.loads((artifact_dir / "edit-plan.json").read_text(encoding="utf-8"))
@@ -66,7 +66,11 @@ def test_prompt_requires_replace_or_add_with_compact_heading_locations(tmp_path:
     assert "replace_block" in prompt
     assert "add_block" in prompt
     assert "title section" in prompt
-    assert "Adding a level-one title is not allowed" in prompt
+    assert "Do not add a level-one heading" in prompt
+    assert "`b1` may be used as `parent_block_id` when it is eligible" in prompt
+    assert "preserve every existing behavior in that section" in prompt
+    assert "validation_mode=\"automatic\"" in prompt
+    assert "Never invent a block ID" in prompt
     assert "Clusters are attribution records only" in prompt
 
 
