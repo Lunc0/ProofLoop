@@ -9,6 +9,7 @@ from skill_evolve.candidate.contracts import (
     CandidateMetadata,
     CandidateOrigin,
     CandidateStatus,
+    CodingAgentProvenance,
     ExternalSource,
     OptimizerProvenance,
     ResolvedCandidate,
@@ -67,6 +68,7 @@ class CandidateService:
         external_source: ExternalSource | None = None,
         notice_source: Path | None = None,
         optimizer_provenance: OptimizerProvenance | None = None,
+        coding_agent_provenance: CodingAgentProvenance | None = None,
     ) -> ResolvedCandidate:
         validate_skill_id(skill_id)
         candidate_id = f"{skill_id}/{candidate_name}"
@@ -84,6 +86,7 @@ class CandidateService:
                 origin=origin,
                 external_source=external_source,
                 optimizer_provenance=optimizer_provenance,
+                coding_agent_provenance=coding_agent_provenance,
             ),
             skill_source,
             notice_source,
@@ -118,6 +121,7 @@ class CandidateService:
         origin: CandidateOrigin,
         external_source: ExternalSource | None,
         optimizer_provenance: OptimizerProvenance | None = None,
+        coding_agent_provenance: CodingAgentProvenance | None = None,
     ) -> CandidateMetadata:
         skill_sha256 = skill_sha256_for_source(skill_source)
         return CandidateMetadata(
@@ -131,4 +135,5 @@ class CandidateService:
             status=CandidateStatus.DRAFT,
             external_source=external_source,
             optimizer_provenance=optimizer_provenance,
+            coding_agent_provenance=coding_agent_provenance,
         )

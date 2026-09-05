@@ -19,6 +19,10 @@ manifest；本地 optimizer 凭据只能放在根目录 Git 忽略的 `.env` 或
 | `SKILL_EVOLVE_DSH_SESSION_LOG_ROOT` | skill-evolve | 是，作为非敏感 resolved DSH session-log root |
 | `SKILL_EVOLVE_HELDOUT_ROOT` | Final adapter | 否；仅指向仓库外 Final custody |
 | `SKILL_EVOLVE_ROTATION_ROOT` | 滚动 adapter | 否；仅指向仓库外 rolling custody |
+| `SKILL_EVOLVE_AGENT_WORKSPACE_ROOT` | coding-agent optimizer | 否；仅定位显式专用临时根 |
+| `SKILL_EVOLVE_CODEX_BINARY` | coding-agent optimizer | 否 |
+| `SKILL_EVOLVE_CODEX_MODEL` | coding-agent optimizer | 是；仅记录非秘密模型标识 |
+| `SKILL_EVOLVE_CODEX_TIMEOUT_MS` | coding-agent optimizer | 否 |
 
 前两个 DSH 覆盖项的优先级都是：进程环境变量 > manifest workspace 中的 `.env` > manifest 值
 （session-log root 未声明时默认 `%USERPROFILE%\\.dsh\\sessions`）。两个 custody root 只应在可信
@@ -166,6 +170,28 @@ uv run skill-evolve optimizer materialize <run-id> --candidate-name <child-name>
 成功的 run artifact 位于 `optimizer/materialization/`，包含 `rendered.patch` 和 `receipt.json`；根
 `result.json` 的 `optimizer_materialization` 及 stdout 只输出安全摘要。新 child 保持 `draft`，不会自动评测、选择、
 晋级或回退。
+
+## Codex Coding Agent 原子编辑路径（v0.27）
+
+该路径与上述 DeepSeek advice/EditPlan 路径并存，不会替换旧 optimizer，也不会自动接入
+`evolution cycle`。先建立一个已存在的绝对专用目录，并确保它不与 repository、`runs/`、candidate store
+或 held-out custody 重叠：
+
+```powershell
+$env:SKILL_EVOLVE_AGENT_WORKSPACE_ROOT = 'D:\skill-evolve-agent-workspaces'
+uv run skill-evolve optimizer agent-edit <run-id>
+uv run skill-evolve optimizer agent-materialize <run-id> --candidate-name-prefix <prefix>
+```
+
+`agent-edit` 复用预先完成的 `codex login`，要求 Codex CLI 至少为 0.138.0，并通过严格的细粒度 permission
+profile 让 workspace 默认只读、仅 `output/` 可写，同时关闭 agent command network、Web Search、approval、
+apps 和 multi-agent。它只接受 `output/SKILL.md` 与 `output/atomic-edits.json`；stdout/stderr 不构成成功证据。
+同一 run 的编辑 artifacts 只发布一次，重复运行会拒绝覆盖。
+
+系统把 1–3 个 `replace_block` 声明绑定到 parent Skill/SkillMap/evidence/invocation hash，验证 locked/overlap、
+singleton replay、full replay 和完整 Skill 的逐字节等价后，才发布 `optimizer/coding-agent/bound/`。
+`agent-materialize` 不调用模型或 benchmark，只创建一个 full 与每个 edit 对应的 singleton draft sibling，
+并写入独立 `coding_agent_provenance`。它也拒绝覆盖已有 materialization receipt，不会自动评测、选择或晋升。
 
 ## 新机器运行
 

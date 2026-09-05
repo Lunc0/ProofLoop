@@ -10,6 +10,13 @@ from typer.testing import CliRunner
 
 from skill_evolve.benchmark import LIVE_SQL_BENCH_BASE_LITE_EVOLUTION_ADAPTER_ID
 from skill_evolve.cli import app
+from skill_evolve.optimizer.coding_agent.contracts import (
+    AtomicEditSource,
+    CodingAgentEditReceipt,
+    CodingAgentEditResult,
+    CodingAgentMaterializationReceipt,
+    CodingAgentMaterializationResult,
+)
 from skill_evolve.optimizer.contracts import AdviceSource, OptimizationResult, OptimizerReceipt
 from skill_evolve.registry import RunDirectory, RunStore
 from skill_evolve.subject import RunSubject
@@ -107,6 +114,84 @@ def test_advice_command_rejects_non_evolution_or_incomplete_run(
     assert "requires a completed Evolution run" in rejected_kind.stderr
     assert "inputs/subject.json" in rejected_input.stderr
     assert not called
+
+
+def test_agent_edit_command_uses_separate_result_key_without_printing_skill(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run = _write_completed_evolution_run(tmp_path / "runs")
+
+    def fake_agent_edit(*args: object, **kwargs: object) -> CodingAgentEditResult:
+        del args, kwargs
+        source = AtomicEditSource(
+            run_id=run.run_id,
+            parent_candidate_id="candidate-1",
+            parent_skill_sha256="1" * 64,
+            skill_map_sha256="2" * 64,
+            evidence_bundle_sha256="3" * 64,
+            invocation_receipt_sha256="4" * 64,
+        )
+        return CodingAgentEditResult(
+            receipt=CodingAgentEditReceipt(
+                status="validated",
+                source=source,
+                atomic_edits_sha256="5" * 64,
+                full_skill_sha256="6" * 64,
+                edit_count=1,
+            ),
+            atomic_edits_path="optimizer/coding-agent/bound/atomic-edits.json",
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("skill_evolve.cli.edit_with_coding_agent", fake_agent_edit)
+    result = CliRunner().invoke(app, ["optimizer", "agent-edit", run.run_id])
+
+    assert result.exit_code == 0
+    assert "PRIVATE SKILL CONTENT" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["optimizer_coding_agent"]["status"] == "validated"
+    persisted = json.loads((run.path / "result.json").read_text(encoding="utf-8"))
+    assert "optimizer" not in persisted
+    assert persisted["optimizer_coding_agent"]["edit_count"] == 1
+
+
+def test_agent_materialize_command_reports_only_created_candidate_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run = _write_completed_evolution_run(tmp_path / "runs")
+
+    def fake_materialize(*args: object, **kwargs: object) -> CodingAgentMaterializationResult:
+        del args, kwargs
+        return CodingAgentMaterializationResult(
+            receipt=CodingAgentMaterializationReceipt(
+                status="created",
+                parent_candidate_id="candidate-1",
+                atomic_edits_sha256="a" * 64,
+                created_candidate_ids=("skill/agent-full", "skill/agent-edit-001"),
+            )
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "skill_evolve.cli.materialize_coding_agent_edits", fake_materialize
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "optimizer",
+            "agent-materialize",
+            run.run_id,
+            "--candidate-name-prefix",
+            "agent",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["optimizer_coding_agent_materialization"]["created_candidate_ids"] == [
+        "skill/agent-full",
+        "skill/agent-edit-001",
+    ]
 
 
 def _write_completed_evolution_run(runs_root: Path) -> RunDirectory:

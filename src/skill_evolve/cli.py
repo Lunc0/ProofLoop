@@ -45,6 +45,10 @@ from skill_evolve.config.dotenv import read_dotenv_value
 from skill_evolve.config.models import OptimizerConfig
 from skill_evolve.evolution import EvolutionCycleError, EvolutionCycleRequest, run_evolution_cycle
 from skill_evolve.fingerprint import create_snapshot
+from skill_evolve.optimizer.coding_agent.materialization import (
+    materialize_coding_agent_edits,
+)
+from skill_evolve.optimizer.coding_agent.service import edit_with_coding_agent
 from skill_evolve.optimizer.edit_plan_service import plan_after_evolution
 from skill_evolve.optimizer.materialization_service import materialize_after_evolution
 from skill_evolve.optimizer.service import advise_after_evolution
@@ -289,6 +293,73 @@ def materialize_optimizer(
         {
             "run_id": run.run_id,
             "optimizer_materialization": result["optimizer_materialization"],
+        }
+    )
+
+
+@optimizer_app.command("agent-edit")
+def edit_with_agent_optimizer(run_id: str) -> None:
+    """Run one isolated Codex edit for a completed Evolution run; no benchmark."""
+
+    try:
+        run = RunStore(_runs_root()).open(run_id)
+        subject, run_status, result = _load_evolution_optimizer_context(run, "agent-edit")
+        agent_result = edit_with_coding_agent(
+            run,
+            subject,
+            run_status=run_status,
+            repository_root=Path.cwd(),
+            candidate_store_root=_candidate_root(),
+            runs_root=_runs_root(),
+        )
+    except (RunNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        _exit_with_error(str(error), 64)
+    receipt = agent_result.receipt
+    result["optimizer_coding_agent"] = {
+        "status": receipt.status,
+        "error_code": receipt.error_code,
+        "atomic_edits_path": agent_result.atomic_edits_path,
+        "atomic_edits_sha256": receipt.atomic_edits_sha256,
+        "full_skill_sha256": receipt.full_skill_sha256,
+        "edit_count": receipt.edit_count,
+    }
+    run.write_json("result.json", result)
+    _echo_json({"run_id": run.run_id, "optimizer_coding_agent": result["optimizer_coding_agent"]})
+
+
+@optimizer_app.command("agent-materialize")
+def materialize_agent_optimizer(
+    run_id: str,
+    candidate_name_prefix: Annotated[str, typer.Option("--candidate-name-prefix")],
+) -> None:
+    """Materialize validated Codex edits as draft siblings; no model or benchmark."""
+
+    try:
+        run = RunStore(_runs_root()).open(run_id)
+        subject, _, result = _load_evolution_optimizer_context(run, "agent-materialize")
+        materialization = materialize_coding_agent_edits(
+            run,
+            subject,
+            _candidate_service(),
+            candidate_name_prefix,
+        )
+    except (RunNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
+        _exit_with_error(str(error), 64)
+    receipt = materialization.receipt
+    result["optimizer_coding_agent_materialization"] = {
+        "status": receipt.status,
+        "error_code": receipt.error_code,
+        "parent_candidate_id": receipt.parent_candidate_id,
+        "atomic_edits_sha256": receipt.atomic_edits_sha256,
+        "created_candidate_ids": list(receipt.created_candidate_ids),
+    }
+    run.write_json("result.json", result)
+    _echo_json(
+        {
+            "run_id": run.run_id,
+            "optimizer_coding_agent_materialization": result[
+                "optimizer_coding_agent_materialization"
+            ],
         }
     )
 

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -40,6 +40,7 @@ class CandidateOrigin(StrEnum):
     MANUAL = "manual"
     EXTERNAL_AGENT = "external_agent"
     OPTIMIZER = "optimizer"
+    CODING_AGENT = "coding_agent"
 
 
 class ExternalSource(StrictCandidateModel):
@@ -114,6 +115,62 @@ class OptimizerProvenance(StrictCandidateModel):
         return value
 
 
+class CodingAgentProvenance(StrictCandidateModel):
+    """Immutable lineage for a candidate replayed from coding-agent atomic edits."""
+
+    atomic_edits_sha256: str
+    patch_sha256: str
+    parent_skill_sha256: str
+    skill_map_sha256: str
+    evidence_bundle_sha256: str
+    locator_policy_version: Literal["skill-map-policy-v3"] = "skill-map-policy-v3"
+    replay_policy_version: Literal["atomic-skill-replay-policy-v1"] = (
+        "atomic-skill-replay-policy-v1"
+    )
+    candidate_role: Literal["full", "singleton"]
+    edit_id: str | None = None
+    codex_cli_version: str
+    model: str | None = None
+
+    @field_validator(
+        "atomic_edits_sha256",
+        "patch_sha256",
+        "parent_skill_sha256",
+        "skill_map_sha256",
+        "evidence_bundle_sha256",
+    )
+    @classmethod
+    def validate_hashes(cls, value: str) -> str:
+        _validate_sha256(value, "coding agent provenance hash")
+        return value
+
+    @field_validator("codex_cli_version")
+    @classmethod
+    def validate_version(cls, value: str) -> str:
+        if re.fullmatch(r"\d+\.\d+\.\d+", value) is None:
+            raise ValueError("codex_cli_version must be a semantic version")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", value
+        ) is None:
+            raise ValueError("coding-agent model has an invalid format")
+        return value
+
+    @model_validator(mode="after")
+    def validate_role(self) -> Self:
+        if self.candidate_role == "full" and self.edit_id is not None:
+            raise ValueError("full coding-agent candidates must not bind one edit_id")
+        if self.candidate_role == "singleton" and (
+            self.edit_id is None or re.fullmatch(r"edit-[0-9]{3}", self.edit_id) is None
+        ):
+            raise ValueError("singleton coding-agent candidates require one edit_id")
+        return self
+
+
 class CandidateMetadata(StrictCandidateModel):
     """Immutable metadata written beside one candidate's ``SKILL.md``."""
 
@@ -128,6 +185,7 @@ class CandidateMetadata(StrictCandidateModel):
     status: CandidateStatus = CandidateStatus.DRAFT
     external_source: ExternalSource | None = None
     optimizer_provenance: OptimizerProvenance | None = None
+    coding_agent_provenance: CodingAgentProvenance | None = None
 
     @field_validator("schema_version")
     @classmethod
@@ -192,6 +250,16 @@ class CandidateMetadata(StrictCandidateModel):
                 raise ValueError("optimizer candidates require local optimizer provenance")
         elif self.optimizer_provenance is not None:
             raise ValueError("optimizer provenance requires optimizer origin")
+        if self.origin is CandidateOrigin.CODING_AGENT:
+            if (
+                self.coding_agent_provenance is None
+                or self.parent_candidate_id is None
+                or self.source_run_id is None
+                or self.external_source is not None
+            ):
+                raise ValueError("coding-agent candidates require local provenance")
+        elif self.coding_agent_provenance is not None:
+            raise ValueError("coding-agent provenance requires coding-agent origin")
         return self
 
 
