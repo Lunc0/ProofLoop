@@ -147,6 +147,7 @@ def test_v3_projection_selects_context_and_keeps_failure_episode(tmp_path: Path)
     assert projection.evaluated_skill.content_sha256 == hashlib.sha256(
         projection.skill.encode("utf-8")
     ).hexdigest()
+    assert "Do not infer the expected SQL or result from private material." in projection.skill
     assert "redacted_session_sha256" not in payload
     assert "PRIVATE GOLD" not in payload
     assert '"seq":' not in payload
@@ -486,7 +487,10 @@ def _evaluation(case_id: str) -> CaseEvaluation:
 
 
 def _subject() -> RunSubject:
-    content = b"# SQL skill\n\nDo not send multiple SQL statements to sql-readonly.\n"
+    content = (
+        b"# SQL skill\n\nDo not send multiple SQL statements to sql-readonly.\n"
+        b"Do not infer the expected SQL or result from private material.\n"
+    )
     return RunSubject(
         subject_id="subject",
         content_sha256=hashlib.sha256(content).hexdigest(),

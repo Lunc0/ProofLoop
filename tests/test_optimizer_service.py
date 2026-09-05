@@ -158,6 +158,49 @@ def test_tampered_agent_input_skips_without_calling_client(tmp_path: Path) -> No
     assert client.calls == []
 
 
+def test_sanitized_skill_binding_can_call_optimizer(tmp_path: Path) -> None:
+    run = RunStore(tmp_path / "runs").create()
+    content = b"# SQL Skill\n\napi_key=demo-not-a-real-secret\n"
+    subject = RunSubject(
+        subject_id="candidate-1",
+        content_sha256=hashlib.sha256(content).hexdigest(),
+        content=content,
+    )
+    sanitized_skill = "# SQL Skill\n\napi_key=<redacted>\n"
+    _write_input(run, subject, skill=sanitized_skill)
+    client = FakeOptimizerClient(_model_response("case-1"))
+
+    result = advise_after_evolution(
+        run,
+        subject,
+        OptimizerConfig(enabled=True),
+        run_status="task_failure",
+        client=client,
+    )
+
+    assert result.receipt.status == "proposed"
+    assert len(client.calls) == 1
+    assert "api_key=<redacted>" in client.calls[0][1]
+
+
+def test_agent_input_subject_id_mismatch_skips_without_calling_client(tmp_path: Path) -> None:
+    run = RunStore(tmp_path / "runs").create()
+    subject = _subject()
+    _write_input(run, subject, evaluated_subject_id="another-candidate")
+    client = FakeOptimizerClient(_model_response("case-1"))
+
+    result = advise_after_evolution(
+        run,
+        subject,
+        OptimizerConfig(enabled=True),
+        run_status="task_failure",
+        client=client,
+    )
+
+    assert result.receipt.status == "skipped_invalid_evidence"
+    assert client.calls == []
+
+
 def _subject() -> RunSubject:
     content = b"# SQL Skill\n\n- Inspect schema before SQL.\n"
     return RunSubject(
@@ -172,16 +215,19 @@ def _write_input(
     subject: RunSubject,
     *,
     trajectories: tuple[EvolutionProjectionCaseV3, ...] | None = None,
+    skill: str | None = None,
+    evaluated_subject_id: str | None = None,
 ) -> None:
     input_trajectories = trajectories if trajectories is not None else (_failed_case(),)
+    skill_text = subject.content.decode("utf-8") if skill is None else skill
     payload = EvolutionAgentInputV3(
         projection_rule_version="evolution-projection-v3.1",
         environment_fingerprint="e" * 64,
         evaluated_skill=EvaluatedSkill(
-            subject_id=subject.subject_id,
-            content_sha256=subject.content_sha256,
+            subject_id=subject.subject_id if evaluated_subject_id is None else evaluated_subject_id,
+            content_sha256=hashlib.sha256(skill_text.encode("utf-8")).hexdigest(),
         ),
-        skill=subject.content.decode("utf-8"),
+        skill=skill_text,
         trajectories=input_trajectories,
     )
     payload_bytes = canonical_json_bytes(payload.model_dump(mode="json"))

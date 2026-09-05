@@ -56,9 +56,6 @@ _IGNORED_EVENT_TYPES = frozenset(
 _ABSOLUTE_PATH_PATTERN = re.compile(
     r"(?i)(?:[A-Z]:(?:\\|/(?!/))[^\s\"']+|/(?:Users|home|var|tmp)/[^\s\"']+)"
 )
-_PRIVATE_RESULT_LINE_PATTERN = re.compile(
-    r"(?im)^.*\b(?:gold|gt|expected)[ _-]?(?:sql|query|result)\b.*$"
-)
 _EXIT_CODE_PATTERN = re.compile(r"(?i)(?:\[\s*)?exit\s*code\s*[:=]?\s*(\d+)")
 _MULTIPLE_STATEMENTS_PATTERN = re.compile(
     r"(?i)multiple\s+(?:sql\s+)?statements?\s+(?:are\s+)?not\s+allowed"
@@ -895,8 +892,7 @@ def _bounded_evidence(
 
 def _safe_text(value: str) -> str:
     redacted = redact_text(value)
-    redacted = _ABSOLUTE_PATH_PATTERN.sub("<absolute-path>", redacted)
-    return _PRIVATE_RESULT_LINE_PATTERN.sub("<private-evaluator-material-redacted>", redacted)
+    return _ABSOLUTE_PATH_PATTERN.sub("<absolute-path>", redacted)
 
 
 def _truncate_utf8(value: str, limit: int) -> str:

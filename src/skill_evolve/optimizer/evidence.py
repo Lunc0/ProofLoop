@@ -43,7 +43,6 @@ def load_prepared_evolution_input(
             return None
         payload = EvolutionAgentInputV3.model_validate_json(payload_bytes)
         canonical_payload = canonical_json_bytes(payload.model_dump(mode="json"))
-        subject_text = subject.content.decode("utf-8")
     except (OSError, UnicodeDecodeError, ValidationError, ValueError):
         return None
     if payload_bytes not in {canonical_payload, canonical_payload + b"\n"}:
@@ -59,10 +58,6 @@ def load_prepared_evolution_input(
     if manifest.included_case_count != len(payload.trajectories):
         return None
     if payload.evaluated_skill.subject_id != subject.subject_id:
-        return None
-    if payload.evaluated_skill.content_sha256 != subject.content_sha256:
-        return None
-    if payload.skill != subject_text:
         return None
     return PreparedEvolutionInput(
         source=AdviceSource(
