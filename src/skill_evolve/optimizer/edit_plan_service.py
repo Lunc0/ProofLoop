@@ -136,6 +136,7 @@ Skill location, not by case, evidence item, module, or defect type.
 
 If multiple clusters require compatible changes to the same section, create one edit
 and reference all corresponding `cluster_indices`.
+`cluster_indices` are 1-based and refer to positions in the returned `clusters` array.
 
 If one cluster requires independent changes to multiple non-overlapping sections,
 multiple edits may reference that same cluster.
