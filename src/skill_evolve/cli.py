@@ -23,6 +23,11 @@ from skill_evolve.benchmark.livesqlbench_adapter import LIVE_SQL_BENCH_DEFAULT_I
 from skill_evolve.benchmark.livesqlbench_heldout import (
     HeldOutError,
     initialise_heldout_manifest,
+    load_heldout_suite,
+)
+from skill_evolve.benchmark.livesqlbench_heldout_run import (
+    HeldOutLiveSQLBenchRunError,
+    run_heldout_dsh_case,
 )
 from skill_evolve.benchmark.livesqlbench_rotation import (
     RotationError,
@@ -436,6 +441,38 @@ def run_benchmark(
         dsh_manifest,
         subject_from_candidate(candidate) if candidate is not None else None,
     )
+
+
+@benchmark_app.command("run-heldout-case")
+def run_heldout_case(
+    data_root: Annotated[Path, typer.Argument(file_okay=False)],
+    dsh_manifest: Annotated[Path, typer.Argument(dir_okay=False)],
+    case_id: Annotated[str, typer.Option("--case")],
+    candidate_id: Annotated[str | None, typer.Option("--candidate")] = None,
+) -> None:
+    """Run one exact final held-out case as a custody-only diagnostic."""
+
+    candidate = _resolve_candidate(candidate_id) if candidate_id is not None else None
+    try:
+        suite = load_heldout_suite(
+            data_root,
+            repository_root=Path.cwd(),
+            candidate_store_root=_candidate_root(),
+        )
+        dsh_resolved = load_manifest(dsh_manifest)
+        outcome = run_heldout_dsh_case(
+            suite,
+            case_id,
+            dsh_resolved.manifest.environment.dsh,
+            dsh_resolved.profile_patch,
+            dsh_resolved.manifest.environment.model,
+            subject_from_candidate(candidate) if candidate is not None else None,
+        )
+    except (HeldOutError, HeldOutLiveSQLBenchRunError, ManifestError) as error:
+        _exit_with_error(str(error), 64)
+    _echo_json(outcome.public_result)
+    if outcome.exit_code:
+        raise typer.Exit(outcome.exit_code)
 
 
 @benchmark_app.command("initialize-heldout")

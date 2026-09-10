@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from skill_evolve.benchmark.livesqlbench_heldout import (
     HELDOUT_TIERS,
     HeldOutError,
     HeldOutLiveSQLBenchSuite,
+    select_heldout_case,
 )
 from skill_evolve.config.models import CaseConfig, DshConfig, EvaluatorConfig, ModelConfig
 from skill_evolve.evaluator.core import CaseEvaluation, Verdict
@@ -135,6 +138,85 @@ def run_heldout_dsh_suite(
     )
 
 
+def run_heldout_dsh_case(
+    suite: HeldOutLiveSQLBenchSuite,
+    case_id: str,
+    dsh_config: DshConfig,
+    profile_patch: Path | None,
+    model: ModelConfig,
+    subject: RunSubject | None = None,
+) -> HeldOutLiveSQLBenchRunOutcome:
+    """Run one exact manifest-bound case and retain all details in custody."""
+
+    case = select_heldout_case(suite, case_id)
+    if dsh_config.runner != "dsh":
+        raise HeldOutLiveSQLBenchRunError("held-out automatic runs require dsh.runner: dsh")
+    _require_custody_session_log_root(suite, dsh_config)
+    run = _create_single_case_run(suite, case)
+    started_at = time.monotonic()
+    environment_fingerprint = _environment_fingerprint(
+        suite,
+        dsh_config,
+        model,
+        subject,
+        run_mode="single_case_diagnostic",
+        selected_case_id=case.instance_id,
+    )
+    _write_initial_custody_evidence(
+        run,
+        suite,
+        dsh_config,
+        model,
+        environment_fingerprint,
+        subject,
+        run_mode="single_case_diagnostic",
+        selected_case_id=case.instance_id,
+    )
+    try:
+        runner_case, execution, evaluation = _run_case(
+            case,
+            suite,
+            dsh_config,
+            profile_patch,
+            model,
+            run,
+            environment_fingerprint,
+            subject,
+        )
+    except LiveSQLBenchFixtureError as error:
+        return _finish_single_case_run(
+            run,
+            suite,
+            environment_fingerprint,
+            (),
+            eval_data_failure(f"live_fixture_invalid: {type(error).__name__}"),
+            subject,
+            _elapsed_milliseconds(started_at),
+        )
+    except RunnerError:
+        runner_case, evaluation = synthetic_runner_error_case(case)
+        execution = None
+
+    runner_output = RunnerOutput(schema_version="v1", cases=(runner_case,))
+    run.write_bytes(
+        "raw/runner-output.json",
+        (runner_output.model_dump_json(indent=2) + "\n").encode(),
+    )
+    if execution is not None:
+        _write_runner_artifacts(run, case.instance_id, execution)
+        if execution.stderr:
+            run.write_text("raw/runner.stderr.log", execution.stderr)
+    return _finish_single_case_run(
+        run,
+        suite,
+        environment_fingerprint,
+        (evaluation,),
+        attribute((evaluation,)),
+        subject,
+        _elapsed_milliseconds(started_at),
+    )
+
+
 def _run_case(
     case: LiveSQLBenchCase,
     suite: HeldOutLiveSQLBenchSuite,
@@ -192,6 +274,9 @@ def _write_initial_custody_evidence(
     model: ModelConfig,
     environment_fingerprint: str,
     subject: RunSubject | None,
+    *,
+    run_mode: str | None = None,
+    selected_case_id: str | None = None,
 ) -> None:
     subject_binding = subject.public_binding() if subject is not None else None
     environment: dict[str, Any] = {
@@ -199,7 +284,7 @@ def _write_initial_custody_evidence(
         "benchmark": {
             "suite_id": suite.manifest.suite_id,
             "manifest_sha256": suite.manifest.manifest_sha256,
-            "case_count": HELDOUT_CASE_COUNT,
+            "case_count": 1 if selected_case_id is not None else HELDOUT_CASE_COUNT,
         },
         "dsh": dsh_config.model_dump(mode="json"),
         "model": model.model_dump(mode="json"),
@@ -207,13 +292,25 @@ def _write_initial_custody_evidence(
     }
     if subject_binding is not None:
         environment["subject"] = subject_binding
+    if run_mode is not None:
+        environment["run_mode"] = run_mode
+    if selected_case_id is not None:
+        environment["benchmark"]["selected_case_id"] = selected_case_id
     run.write_json("environment.json", environment)
     metadata: dict[str, Any] = {
-        "schema_version": "livesqlbench-heldout-v1",
+        "schema_version": (
+            "livesqlbench-heldout-single-case-v1"
+            if run_mode == "single_case_diagnostic"
+            else "livesqlbench-heldout-v1"
+        ),
         "run_id": run.run_id,
         "benchmark": suite.manifest.suite_id,
         "phase": "snapshotted",
     }
+    if run_mode is not None:
+        metadata["run_mode"] = run_mode
+    if selected_case_id is not None:
+        metadata["selected_case_id"] = selected_case_id
     if subject_binding is not None:
         metadata["subject"] = subject_binding
     run.write_json("run.json", metadata)
@@ -308,6 +405,54 @@ def _write_final_custody_evidence(
     )
 
 
+def _finish_single_case_run(
+    run: RunDirectory,
+    suite: HeldOutLiveSQLBenchSuite,
+    environment_fingerprint: str,
+    evaluations: tuple[CaseEvaluation, ...],
+    attribution: Attribution,
+    subject: RunSubject | None,
+    elapsed_milliseconds: int,
+) -> HeldOutLiveSQLBenchRunOutcome:
+    private_evaluations = [public_evaluation_dict(evaluation) for evaluation in evaluations]
+    run.write_json("evaluation.json", {"cases": private_evaluations})
+    run.write_json("attribution.json", attribution.to_dict())
+    private_result: dict[str, Any] = {
+        "schema_version": "livesqlbench-heldout-single-case-v1",
+        "run_mode": "single_case_diagnostic",
+        "run_id": run.run_id,
+        "environment_fingerprint": environment_fingerprint,
+        "status": attribution.status.value,
+        "attribution": attribution.to_dict(),
+        "cases": private_evaluations,
+    }
+    if subject is not None:
+        private_result["subject"] = subject.public_binding()
+    run.write_json("result.json", private_result)
+    run.write_text(
+        "report.md",
+        build_report(run.run_id, environment_fingerprint, attribution, evaluations),
+    )
+    public_result: JsonObject = {
+        "suite_id": suite.manifest.suite_id,
+        "manifest_sha256": suite.manifest.manifest_sha256,
+        "subject_binding": _public_subject_binding(subject),
+        "run_mode": "single_case_diagnostic",
+        "status": attribution.status.value,
+        "evaluated_count": len(evaluations),
+        "duration_ms": elapsed_milliseconds,
+        "cost_usd": _single_case_cost(evaluations),
+    }
+    run.write_json("diagnostic-result.json", public_result)
+    return HeldOutLiveSQLBenchRunOutcome(
+        run=run,
+        environment_fingerprint=environment_fingerprint,
+        attribution=attribution,
+        evaluations=evaluations,
+        public_result=public_result,
+    )
+
+
 def _public_result(
     suite: HeldOutLiveSQLBenchSuite,
     evaluations: tuple[CaseEvaluation, ...],
@@ -386,6 +531,15 @@ def _total_cost(evaluations: tuple[CaseEvaluation, ...]) -> float | None:
     return sum(known_costs)
 
 
+def _single_case_cost(evaluations: tuple[CaseEvaluation, ...]) -> float | None:
+    if len(evaluations) != 1:
+        return None
+    cost = evaluations[0].usage.get("cost_usd")
+    if not isinstance(cost, (float, int)):
+        return None
+    return float(cost)
+
+
 def _public_subject_binding(subject: RunSubject | None) -> JsonObject | None:
     if subject is None:
         return None
@@ -400,6 +554,9 @@ def _environment_fingerprint(
     dsh_config: DshConfig,
     model: ModelConfig,
     subject: RunSubject | None,
+    *,
+    run_mode: str | None = None,
+    selected_case_id: str | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "benchmark": suite.manifest.suite_id,
@@ -411,6 +568,10 @@ def _environment_fingerprint(
     }
     if subject is not None:
         payload["subject"] = subject.public_binding()
+    if run_mode is not None:
+        payload["run_mode"] = run_mode
+    if selected_case_id is not None:
+        payload["selected_case_id"] = selected_case_id
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -428,6 +589,47 @@ def _custody_run_store(suite: HeldOutLiveSQLBenchSuite) -> RunStore:
     except OSError as error:
         raise HeldOutError("held-out evaluator custody root is unavailable") from error
     return RunStore(runs_root)
+
+
+def _create_single_case_run(
+    suite: HeldOutLiveSQLBenchSuite, case: LiveSQLBenchCase
+) -> RunDirectory:
+    single_runs_root = suite.custody.single_runs_root
+    try:
+        if os.path.lexists(single_runs_root):
+            if _is_link_or_reparse(single_runs_root) or not single_runs_root.is_dir():
+                raise HeldOutError("held-out single-run custody root is unavailable")
+        else:
+            single_runs_root.mkdir()
+        resolved_root = single_runs_root.resolve(strict=True)
+        if (
+            _is_link_or_reparse(single_runs_root)
+            or resolved_root.parent != suite.custody.root
+        ):
+            raise HeldOutError("held-out single-run custody root is unavailable")
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        run_id = f"{timestamp}-{case.instance_id}"
+        run_path = resolved_root / run_id
+        run_path.mkdir()
+    except FileExistsError:
+        raise HeldOutLiveSQLBenchRunError(
+            "held-out single-run evidence already exists"
+        ) from None
+    except HeldOutError as error:
+        raise HeldOutLiveSQLBenchRunError(str(error)) from error
+    except OSError as error:
+        raise HeldOutLiveSQLBenchRunError(
+            "held-out single-run custody root is unavailable"
+        ) from error
+    return RunDirectory(run_id=run_id, path=run_path)
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(attributes & reparse_flag)
 
 
 def _require_custody_session_log_root(

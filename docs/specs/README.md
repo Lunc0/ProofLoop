@@ -37,3 +37,4 @@
 | 29 | v0.27 | 已完成 | [Codex Coding Agent 原子 Skill 编辑路径](29-v0.27-codex-coding-agent-optimizer-path.md) | [实施计划](../plans/29-v0.27-codex-coding-agent-optimizer-path.md) | [实现记录](../design/29-v0.27-codex-coding-agent-optimizer-path.md) |
 | 30 | v0.28 | 已完成 | [移除 Evolution 文本的私有结果整行过滤](30-next-remove-private-line-filter.md) | [实施计划](../plans/30-v0.28-remove-private-line-filter.md) | [实现记录](../design/30-v0.28-remove-private-line-filter.md) |
 | 31 | v0.29 | 已完成 | [Benchmark Runner Error 计为错题](31-next-runner-error-as-incorrect.md) | [实施计划](../plans/31-v0.29-runner-error-as-incorrect.md) | [实现记录](../design/31-v0.29-runner-error-as-incorrect.md) |
+| 32 | v0.30 | 已完成 | [Held-out 单题诊断运行](32-v0.30-heldout-single-case-run.md) | [实施计划](../plans/32-v0.30-heldout-single-case-run.md) | [实现记录](../design/32-v0.30-heldout-single-case-run.md) |

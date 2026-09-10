@@ -135,6 +135,10 @@ class HeldOutCustody:
         return self.root / "runs"
 
     @property
+    def single_runs_root(self) -> Path:
+        return self.root / "single-runs"
+
+    @property
     def dsh_session_logs_root(self) -> Path:
         return self.root / "dsh-session-logs"
 
@@ -200,6 +204,19 @@ class HeldOutLiveSQLBenchSuite:
             path.relative_to(self.data_root).as_posix(): _sha256_file(path)
             for path in sorted(paths)
         }
+
+
+def select_heldout_case(
+    suite: HeldOutLiveSQLBenchSuite, instance_id: str
+) -> LiveSQLBenchCase:
+    """Return one exact manifest-bound case without exposing valid identities."""
+
+    if _IDENTIFIER_PATTERN.fullmatch(instance_id) is None:
+        raise HeldOutError("held-out case is unavailable")
+    for case in suite.cases:
+        if case.instance_id == instance_id:
+            return case
+    raise HeldOutError("held-out case is unavailable")
 
 
 def resolve_heldout_custody(

@@ -136,7 +136,49 @@ uv run skill-evolve benchmark validate `
 安全输出只含 suite ID、manifest hash、总题数和每个难度的数量。若 manifest、路径、GT、dump 或 context 不一致，
 命令会 fail closed，且不会启动 Docker、DSH 或模型。
 
-## 6. 最终运行
+## 6. 单题诊断运行
+
+如果只需复现 held-out manifest 中一个已知的精确 `instance_id`，使用独立的单题命令。不要把 prompt、
+数据库名或模糊标题传给 `--case`：
+
+```powershell
+$caseId = '<exact-instance-id>'
+
+uv run skill-evolve benchmark run-heldout-case `
+  <data-root> `
+  <dsh-manifest> `
+  --case $caseId
+```
+
+若要评测一个已验证的本地 candidate，使用完整命令：
+
+```powershell
+uv run skill-evolve benchmark run-heldout-case `
+  <data-root> `
+  <dsh-manifest> `
+  --case $caseId `
+  --candidate dbhub/005-semantic-core
+```
+
+该命令只启动这一题的 PostgreSQL fixture 和一次 DSH/模型调用。完整运行 artifact 写入：
+
+```text
+D:\skill-evolve-evaluator\heldout\single-runs\<YYYYMMDDTHHMMSSZ>-<instance_id>\
+```
+
+以上路径假设 `$env:SKILL_EVOLVE_HELDOUT_ROOT` 已设置为
+`D:\skill-evolve-evaluator\heldout`。目录不可覆盖；若同一秒对同一题重复启动导致名字冲突，第二次运行会
+fail closed。DSH 自身的完整 session 仍按安全配置写入 `$heldoutRoot\dsh-session-logs`，单题目录保存本次运行的
+环境、model-selection、脱敏 runner artifact、evaluation、attribution、result 与 report。
+
+stdout 只返回最小 diagnostic receipt，不显示 case ID、逐题 verdict、SQL、日志路径或 custody 绝对路径。
+单题结果仅用于诊断，不是三十题 Final 分数，不生成 tier/macro 指标，也不能进入 optimizer、Smoke gate 或
+candidate 晋级流程。
+
+真实单题运行仍会启动 Docker、DSH 和模型并产生费用；必须在已核对 provider、凭据、模型、image 与预算后
+由操作者显式执行。
+
+## 7. 最终运行
 
 确认模型、DSH provider、Docker image 和成本预算后，在同一个已配置的 held-out PowerShell 窗口运行。无 Skill
 baseline 不传 `--candidate`：
