@@ -117,6 +117,34 @@ def test_startup_only_timeout_is_partial_insufficient() -> None:
     assert compressed.trajectory == ()
 
 
+def test_native_sql_tools_keep_probe_and_submit_intent() -> None:
+    session = _jsonl(
+        _header(),
+        _tool_call(1, 1, 1, "probe", "sql_probe", '{"query":"SELECT 1"}'),
+        _tool_result(
+            2, 1, 1, "probe", '{"ok":true,"intent":"probe"}', is_error=False
+        ),
+        _tool_call(3, 1, 2, "submit", "sql_submit", '{"query":"SELECT 2"}'),
+        _tool_result(
+            4, 1, 2, "submit", '{"ok":true,"intent":"submit"}', is_error=False
+        ),
+        _assistant(5, 1, 3, [{"type": "text", "text": "done"}]),
+        _turn_end(6, 1),
+    )
+
+    compressed = compress_session_jsonl(
+        session, _runner_case(), _evaluation(), runner_outcome="completed"
+    )
+
+    probe, submit = tuple(
+        call for step in compressed.trajectory for call in step.tool_calls
+    )
+    assert probe.adapter == "sql-readonly"
+    assert probe.summary["intent"] == "probe"
+    assert submit.adapter == "sql-readonly"
+    assert submit.summary["intent"] == "submit"
+
+
 def test_web_search_is_allowed_and_has_deterministic_summary() -> None:
     session = _jsonl(
         _header(),

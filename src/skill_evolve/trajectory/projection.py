@@ -660,6 +660,9 @@ def _project_sql_call(call: CompressedToolCall, policy: CompressorPolicy) -> dic
         "clauses": list(references.clauses),
         "result": _sql_result(call.output, policy),
     }
+    intent = call.summary.get("intent")
+    if intent in {"probe", "submit"}:
+        detail["intent"] = intent
     if references.parse_status != "parsed":
         return {
             "kind": "sql_unparsed",

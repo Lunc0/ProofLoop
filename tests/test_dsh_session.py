@@ -19,6 +19,7 @@ def test_normalise_session_log_preserves_trace_and_provider_usage() -> None:
 
     assert evidence.session_id == "session-123"
     assert evidence.final_message == "```sql\nSELECT COUNT(*) FROM customers\n```"
+    assert evidence.submitted_sql is None
     assert evidence.usage.input_tokens == 15
     assert evidence.usage.output_tokens == 8
     assert [event.type for event in evidence.trajectory] == [
@@ -45,6 +46,57 @@ def test_normalise_session_log_rejects_missing_completed_turn() -> None:
 
     with pytest.raises(DshSessionLogError, match="no completed turn"):
         normalise_session_log(_loaded(events))
+
+
+def test_normalise_session_log_extracts_only_successful_native_sql_submit() -> None:
+    events = list(_session_log().events)
+    events[4:4] = [
+        {
+            "type": "tool/call",
+            "seq": 4,
+            "time": 1_700_000_000_350,
+            "data": {
+                "turn": 1,
+                "step": 2,
+                "callId": "submit-1",
+                "name": "sql_submit",
+                "arguments": '{"query":"SELECT COUNT(*) FROM customers"}',
+            },
+        },
+        {
+            "type": "tool/result",
+            "seq": 5,
+            "time": 1_700_000_000_375,
+            "data": {
+                "turn": 1,
+                "step": 2,
+                "message": {
+                    "role": "tool",
+                    "id": "submit-result-1",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "submit-1",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        '{"ok":true,"intent":"submit",'
+                                        '"phase":"finalize","columns":[],"rows":[]}'
+                                    ),
+                                }
+                            ],
+                            "isError": False,
+                        }
+                    ],
+                },
+            },
+        },
+    ]
+
+    evidence = normalise_session_log(_loaded(events))
+
+    assert evidence.submitted_sql == "SELECT COUNT(*) FROM customers"
 
 
 def test_redaction_removes_secret_key_values_and_inline_bearer_tokens() -> None:

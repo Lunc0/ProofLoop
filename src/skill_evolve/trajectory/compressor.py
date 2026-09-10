@@ -500,6 +500,8 @@ def _compressed_call(
 def _adapter_name(name: str, arguments: str) -> str:
     parsed = _json_object(arguments)
     command = parsed.get("command") if parsed is not None else None
+    if name in {"sql_probe", "sql_submit"}:
+        return "sql-readonly"
     if name == "pwsh" and isinstance(command, str) and "sql-readonly" in command.lower():
         return "sql-readonly"
     if name in {"read", "glob", "pwsh", "sql-readonly", "web_search"}:
@@ -546,6 +548,10 @@ def _tool_summary(
                 ]
                 summary["omitted_count"] = max(0, len(ordered) - policy.max_list_items)
     elif adapter == "sql-readonly" and parsed is not None:
+        if name == "sql_probe":
+            summary["intent"] = "probe"
+        elif name == "sql_submit":
+            summary["intent"] = "submit"
         command = parsed.get("command")
         if isinstance(command, str):
             summary["command_sha256"] = hashlib.sha256(

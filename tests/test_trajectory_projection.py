@@ -88,6 +88,38 @@ def test_sql_readonly_powershell_command_is_extracted_conservatively(tmp_path: P
     assert evidence.detail["qualified_columns"] == ["ORDERS.PRICE"]
 
 
+def test_native_sql_submit_intent_is_projected(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    session = _jsonl(
+        _header(),
+        _tool_call(
+            1,
+            1,
+            1,
+            "submit",
+            "sql_submit",
+            '{"query":"SELECT o.price FROM orders AS o"}',
+        ),
+        _tool_result(2, 1, 1, "submit", '{"ok":true,"intent":"submit"}'),
+        _turn_end(3, 1),
+    )
+    trajectory = compress_session_jsonl(
+        session,
+        RunnerCaseOutput(case_id=case.instance_id, status="completed", trajectory=()),
+        _evaluation(case.instance_id),
+        runner_outcome="completed",
+    )
+
+    projection = build_evolution_agent_input(
+        "custody-manifest", "test-environment", _subject(), ((case, trajectory),)
+    )
+    evidence = next(
+        item for item in projection.trajectories[0].evidence if item.kind == "sql_query"
+    )
+
+    assert evidence.detail["intent"] == "submit"
+
+
 def test_v3_projection_selects_context_and_keeps_failure_episode(tmp_path: Path) -> None:
     case = _case(tmp_path)
     subject = _subject()

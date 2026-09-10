@@ -30,7 +30,7 @@ from skill_evolve.runner.contracts import (
     RunnerExecution,
     RunnerOutput,
 )
-from skill_evolve.runner.dsh import DshRunner
+from skill_evolve.runner.dsh import DshRunner, sql_harness_policy_identity
 from skill_evolve.sql.livesqlbench import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.sql.readonly_service import ReadOnlyQueryService
 from skill_evolve.subject import RunSubject
@@ -317,6 +317,7 @@ def _environment_fingerprint(
         "dsh": dsh_config.model_dump(mode="json"),
         "model": model.model_dump(mode="json"),
         "evaluator": _EVALUATOR_VERSION,
+        "sql_harness_policy": sql_harness_policy_identity(),
     }
     if subject is not None:
         payload["subject"] = subject.public_binding()

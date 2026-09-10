@@ -93,6 +93,7 @@ class LoadedDshSessionLog:
 class SessionEvidence:
     session_id: str
     final_message: str
+    submitted_sql: str | None
     trajectory: tuple[TrajectoryEvent, ...]
     usage: Usage
     unknown_event_types: tuple[str, ...]
@@ -234,6 +235,7 @@ def normalise_session_log(log: LoadedDshSessionLog) -> SessionEvidence:
     return SessionEvidence(
         session_id=session_id,
         final_message=final_messages[-1],
+        submitted_sql=_successful_submitted_sql(trajectory),
         trajectory=tuple(trajectory),
         usage=Usage(
             input_tokens=sum(input_tokens) if input_tokens else None,
@@ -242,6 +244,56 @@ def normalise_session_log(log: LoadedDshSessionLog) -> SessionEvidence:
         ),
         unknown_event_types=tuple(sorted(unknown_event_types)),
     )
+
+
+def _successful_submitted_sql(trajectory: list[TrajectoryEvent]) -> str | None:
+    submitted_calls: dict[str, str] = {}
+    successful_queries: list[str] = []
+    for event in trajectory:
+        if event.type == "dsh_tool_call" and event.payload.get("name") == "sql_submit":
+            call_id = event.payload.get("call_id")
+            arguments = event.payload.get("arguments")
+            if not isinstance(call_id, str) or not isinstance(arguments, str):
+                raise DshSessionLogError("sql_submit call evidence is incomplete")
+            if call_id in submitted_calls:
+                raise DshSessionLogError("sql_submit call id is duplicated")
+            try:
+                parsed = json.loads(arguments)
+            except json.JSONDecodeError as error:
+                raise DshSessionLogError("sql_submit arguments are not JSON") from error
+            query = parsed.get("query") if isinstance(parsed, dict) else None
+            if not isinstance(query, str) or not query.strip():
+                raise DshSessionLogError("sql_submit arguments have no query")
+            submitted_calls[call_id] = query
+        elif event.type == "dsh_tool_result":
+            call_id = event.payload.get("call_id")
+            if call_id not in submitted_calls or event.payload.get("is_error") is not False:
+                continue
+            result = _tool_result_json(event.payload.get("content"))
+            if (
+                result.get("ok") is True
+                and result.get("intent") == "submit"
+                and result.get("phase") == "finalize"
+            ):
+                successful_queries.append(submitted_calls[call_id])
+    return successful_queries[-1] if successful_queries else None
+
+
+def _tool_result_json(value: Any) -> dict[str, Any]:
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise DshSessionLogError("sql_submit result content is invalid")
+    block = value[0]
+    if block.get("type") != "tool-result":
+        raise DshSessionLogError("sql_submit result content has an unsupported block")
+    nested = block.get("content")
+    text = _content_text(nested, "sql_submit result content")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise DshSessionLogError("sql_submit result is not JSON") from error
+    if not isinstance(parsed, dict):
+        raise DshSessionLogError("sql_submit result is not an object")
+    return parsed
 
 
 def _load_jsonl(value: str) -> LoadedDshSessionLog:

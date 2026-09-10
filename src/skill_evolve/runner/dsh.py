@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -10,8 +11,10 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import resources
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -42,6 +45,9 @@ _CREDENTIAL_FIELD_PATTERN = re.compile(
     r"(?:api[_-]?key|access[_-]?token|token|secret|password|authorization)$", re.IGNORECASE
 )
 _ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SQL_HARNESS_POLICY_VERSION = "dsh-sql-harness-policy-v1"
+_SQL_HARNESS_PLUGIN_FILENAME = "sql_harness_policy.mjs"
+_SQL_HARNESS_ALLOWED_TOOLS = ("read", "grep", "sql_probe", "sql_submit")
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,16 @@ class DshModelSelection:
 
 class DshModelSettingsError(ValueError):
     """DSH user settings cannot safely supply a provider configuration."""
+
+
+@dataclass(frozen=True)
+class DshSqlHarnessPolicy:
+    """Run-scoped native SQL tool and policy overlay for one DSH case."""
+
+    patch_path: Path
+    patch_content: bytes
+    plugin_content: bytes
+    metadata_content: bytes
 
 
 class DshRunner:
@@ -108,23 +124,32 @@ class DshRunner:
     def _run_case(
         self, case: CaseConfig, input: RunInput, model_selection: DshModelSelection
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
+        started_at = _utc_timestamp()
+        sql_policy: DshSqlHarnessPolicy | None = None
         command = self._command_for(
             case,
             input.database_access is not None,
             input.subject.filename if input.subject is not None else None,
             model_selection,
         )
-        started_at = _utc_timestamp()
         try:
-            workspace = _prepare_task_workspace(case, input)
-        except OSError as error:
+            workspace, resource_paths = _prepare_task_workspace(case, input)
+            sql_policy = _prepare_sql_harness_policy(case, input, resource_paths)
+            command = self._command_for(
+                case,
+                input.database_access is not None,
+                input.subject.filename if input.subject is not None else None,
+                model_selection,
+                sql_policy,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as error:
             return self._failed_case(
                 case,
                 command,
                 started_at,
                 "",
                 str(error),
-                f"could not prepare DSH task workspace: {error.__class__.__name__}",
+                f"could not prepare DSH task runtime: {error.__class__.__name__}",
                 model_selection,
             )
         session_before = None
@@ -133,7 +158,14 @@ class DshRunner:
                 session_before = snapshot_session_logs(Path(self._config.session_log_root))
             except DshSessionLogError as error:
                 return self._failed_case(
-                    case, command, started_at, "", "", str(error), model_selection
+                    case,
+                    command,
+                    started_at,
+                    "",
+                    "",
+                    str(error),
+                    model_selection,
+                    sql_policy=sql_policy,
                 )
         try:
             completed = subprocess.run(
@@ -164,6 +196,7 @@ class DshRunner:
                     self._config.session_log_root,
                     workspace,
                 ),
+                sql_policy,
             )
         except OSError as error:
             return self._failed_case(
@@ -174,12 +207,19 @@ class DshRunner:
                 str(error),
                 f"could not start DSH: {error.__class__.__name__}",
                 model_selection,
+                sql_policy=sql_policy,
             )
 
         stdout = redact_text(completed.stdout)
         stderr = redact_text(completed.stderr)
         artifacts = _case_artifacts(
-            case.id, command, stdout, stderr, self._config.timeout_ms, model_selection
+            case.id,
+            command,
+            stdout,
+            stderr,
+            self._config.timeout_ms,
+            model_selection,
+            sql_policy,
         )
         if completed.returncode != 0:
             return (
@@ -228,6 +268,17 @@ class DshRunner:
                     artifacts,
                     stderr,
                 )
+            binding_error = _sql_submission_binding_error(
+                candidate_sql, evidence.submitted_sql, input.database_access is not None
+            )
+            if binding_error is not None:
+                return (
+                    _runner_error_output(
+                        case, started_at, evidence.final_message, binding_error
+                    ),
+                    artifacts,
+                    stderr,
+                )
             trajectory = (
                 TrajectoryEvent(
                     timestamp=started_at,
@@ -259,6 +310,17 @@ class DshRunner:
                 stderr,
             )
 
+        if input.database_access is not None:
+            return (
+                _runner_error_output(
+                    case,
+                    started_at,
+                    stdout,
+                    "native SQL run requires authoritative DSH session evidence",
+                ),
+                artifacts,
+                stderr,
+            )
         candidate_sql, extraction_error = _extract_candidate_sql(stdout)
         if extraction_error is not None:
             return (
@@ -300,6 +362,7 @@ class DshRunner:
         reason: str,
         model_selection: DshModelSelection,
         session_artifacts: tuple[RawArtifact, ...] = (),
+        sql_policy: DshSqlHarnessPolicy | None = None,
     ) -> tuple[RunnerCaseOutput, tuple[RawArtifact, ...], str]:
         redacted_stdout = redact_text(stdout)
         redacted_stderr = redact_text(stderr)
@@ -313,6 +376,7 @@ class DshRunner:
                     redacted_stderr,
                     self._config.timeout_ms,
                     model_selection,
+                    sql_policy,
                 ),
                 *session_artifacts,
             ),
@@ -325,10 +389,13 @@ class DshRunner:
         has_database_access: bool = False,
         subject_path: str | None = None,
         model_selection: DshModelSelection | None = None,
+        sql_policy: DshSqlHarnessPolicy | None = None,
     ) -> list[str]:
         command = [*_dsh_command_prefix(self._config.binary), "--profile", self._config.profile]
         if self._profile_patch is not None:
             command.extend(("--patch", str(self._profile_patch)))
+        if sql_policy is not None:
+            command.extend(("--patch", str(sql_policy.patch_path)))
         command.extend(self._config.runner_args)
         if model_selection is not None:
             command.extend(("--patch", str(model_selection.patch_path)))
@@ -346,8 +413,8 @@ def task_contract(has_database_access: bool, subject_path: str | None) -> str:
     database_instruction = ""
     if has_database_access:
         database_instruction = (
-            "当前目录的 schema.sql 可供查看。如需探索数据，只能通过 "
-            "`.\\sql-readonly.ps1 -Query '<SQL>'` 执行只读查询。"
+            "当前目录的 schema.sql 可供查看。使用 `sql_probe` 探索只读数据；"
+            "确定最终候选后必须用 `sql_submit` 成功执行一次，然后原样提交该查询。"
         )
     subject_instruction = ""
     if subject_path is not None:
@@ -365,27 +432,34 @@ def task_contract(has_database_access: bool, subject_path: str | None) -> str:
     )
 
 
-def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
+def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> tuple[Path, tuple[str, ...]]:
     """Materialise only task-visible, non-secret inputs for one DSH session."""
 
     if input.agent_workspace_root is None:
         if input.subject is not None:
             raise OSError("RunSubject injection requires an isolated agent workspace")
-        return input.workspace
+        if input.database_access is not None:
+            raise OSError("native SQL tools require an isolated agent workspace")
+        return input.workspace, ()
     workspace = input.agent_workspace_root / case.id
     workspace.mkdir(parents=True, exist_ok=False)
+    resource_paths: list[str] = ["TASK.md"]
     if input.schema_file is not None:
         shutil.copyfile(input.schema_file, workspace / "schema.sql")
+        resource_paths.append("schema.sql")
     if input.subject is not None:
         subject_directory = workspace / "subject"
         subject_directory.mkdir()
         (subject_directory / input.subject.filename).write_bytes(input.subject.content)
+        resource_paths.append(f"subject/{input.subject.filename}")
     context_files = input.context_files_for(case.id)
     if context_files:
         context_directory = workspace / "context"
         context_directory.mkdir()
         for index, source in enumerate(context_files, start=1):
-            shutil.copyfile(source, context_directory / f"{index:02d}-{source.name}")
+            relative_path = f"context/{index:02d}-{source.name}"
+            shutil.copyfile(source, workspace / relative_path)
+            resource_paths.append(relative_path)
     subject_task_instruction = (
         f"First read `subject/{input.subject.filename}` and follow its applicable guidance. "
         "It is a text "
@@ -393,16 +467,112 @@ def _prepare_task_workspace(case: CaseConfig, input: RunInput) -> Path:
         if input.subject is not None
         else ""
     )
+    resource_list = "\n".join(f"- `{path}`" for path in resource_paths)
     (workspace / "TASK.md").write_text(
         "# SQL evaluation task\n\n"
         + subject_task_instruction
-        + "Use the supplied prompt. `schema.sql` and `context/` contain the only task context. "
-        "The expected query and evaluator inputs are intentionally not present.\n",
+        + "Use the supplied prompt. The exact task-visible resources are:\n\n"
+        + resource_list
+        + "\n\nDo not discover additional files. The expected query and evaluator inputs are "
+        "intentionally not present.\n",
         encoding="utf-8",
     )
-    if input.database_access is not None:
-        _write_read_only_query_tool(workspace, input.database_access.query_endpoint)
-    return workspace
+    return workspace, tuple(resource_paths)
+
+
+def _prepare_sql_harness_policy(
+    case: CaseConfig, input: RunInput, resource_paths: tuple[str, ...]
+) -> DshSqlHarnessPolicy | None:
+    database_access = input.database_access
+    if database_access is None:
+        return None
+    endpoint = _validated_query_endpoint(database_access.query_endpoint)
+    runtime_directory = _dsh_runtime_directory(input) / case.id
+    runtime_directory.mkdir(parents=True, exist_ok=False)
+    plugin_content = _sql_harness_plugin_content()
+    plugin_path = runtime_directory / _SQL_HARNESS_PLUGIN_FILENAME
+    plugin_path.write_bytes(plugin_content)
+    policy_config = {
+        "policyVersion": _SQL_HARNESS_POLICY_VERSION,
+        "queryEndpoint": endpoint,
+        "resourcePaths": list(resource_paths),
+        "allowedTools": list(_SQL_HARNESS_ALLOWED_TOOLS),
+    }
+    patch_content = yaml.safe_dump(
+        [
+            {
+                "insert": [
+                    {
+                        "id": "skill-evolve-sql-harness-policy",
+                        "name": plugin_path.as_uri(),
+                        "config": policy_config,
+                    }
+                ]
+            }
+        ],
+        allow_unicode=True,
+        sort_keys=False,
+    ).encode("utf-8")
+    patch_path = runtime_directory / "sql-harness-policy.patch.yml"
+    patch_path.write_bytes(patch_content)
+    metadata_content = (
+        json.dumps(
+            {
+                "schema_version": "dsh-sql-harness-policy-binding-v1",
+                "policy_version": _SQL_HARNESS_POLICY_VERSION,
+                "plugin_sha256": hashlib.sha256(plugin_content).hexdigest(),
+                "resource_paths": list(resource_paths),
+                "allowed_tools": list(_SQL_HARNESS_ALLOWED_TOOLS),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return DshSqlHarnessPolicy(
+        patch_path=patch_path,
+        patch_content=patch_content,
+        plugin_content=plugin_content,
+        metadata_content=metadata_content,
+    )
+
+
+def sql_harness_policy_identity() -> dict[str, str]:
+    """Return the stable public identity bound into SQL benchmark fingerprints."""
+
+    return {
+        "policy_version": _SQL_HARNESS_POLICY_VERSION,
+        "plugin_sha256": hashlib.sha256(_sql_harness_plugin_content()).hexdigest(),
+    }
+
+
+def _sql_harness_plugin_content() -> bytes:
+    return (
+        resources.files("skill_evolve.runner.dsh_plugins")
+        .joinpath(_SQL_HARNESS_PLUGIN_FILENAME)
+        .read_bytes()
+    )
+
+
+def _validated_query_endpoint(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("query endpoint is invalid") from error
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is None
+        or parsed.path != "/query"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("query endpoint must be a loopback HTTP /query URL")
+    return value
 
 
 def _prepare_model_selection(input: RunInput, model: ModelConfig) -> DshModelSelection:
@@ -522,25 +692,6 @@ def _dsh_runtime_directory(input: RunInput) -> Path:
     return input.workspace / ".skill-evolve-dsh-runtime"
 
 
-def _write_read_only_query_tool(workspace: Path, query_endpoint: str) -> None:
-    """Create a capability-limited discovery tool for the disposable fixture only."""
-
-    script = f"""[CmdletBinding()]
-param(
-  [Parameter(Mandatory = $true)]
-  [ValidateNotNullOrEmpty()]
-  [string]$Query
-)
-
-$ErrorActionPreference = 'Stop'
-$request = @{{ query = $Query }} | ConvertTo-Json -Compress
-$response = Invoke-RestMethod -Uri '{query_endpoint}' -Method Post `
-  -ContentType 'application/json' -Body $request
-$response | ConvertTo-Json -Depth 16
-"""
-    (workspace / "sql-readonly.ps1").write_text(script, encoding="utf-8")
-
-
 def _session_log_for_workspace(
     candidates: tuple[Path, ...], workspace: Path
 ) -> tuple[Path, LoadedDshSessionLog]:
@@ -623,6 +774,7 @@ def _case_artifacts(
     stderr: str,
     timeout_ms: int,
     model_selection: DshModelSelection,
+    sql_policy: DshSqlHarnessPolicy | None = None,
 ) -> tuple[RawArtifact, ...]:
     invocation = json.dumps(
         {
@@ -636,7 +788,7 @@ def _case_artifacts(
         ensure_ascii=False,
         indent=2,
     )
-    return (
+    artifacts = (
         RawArtifact(
             relative_path=f"dsh/{case_id}.invocation.json",
             content=(invocation + "\n").encode("utf-8"),
@@ -654,6 +806,19 @@ def _case_artifacts(
         RawArtifact(
             relative_path=f"dsh/{case_id}.model-selection.patch.yml",
             content=model_selection.patch_content,
+        ),
+    )
+    if sql_policy is None:
+        return artifacts
+    return (
+        *artifacts,
+        RawArtifact(
+            relative_path=f"dsh/{case_id}.sql-harness-policy.patch.yml",
+            content=sql_policy.patch_content,
+        ),
+        RawArtifact(
+            relative_path=f"dsh/{case_id}.sql-harness-policy.json",
+            content=sql_policy.metadata_content,
         ),
     )
 
@@ -697,6 +862,27 @@ def _extract_candidate_sql(stdout: str) -> tuple[str | None, str | None]:
     if len(blocks) > 1:
         return None, "DSH final answer contains multiple SQL code blocks"
     return (blocks[0], None) if blocks else (None, None)
+
+
+def _sql_submission_binding_error(
+    candidate_sql: str | None, submitted_sql: str | None, required: bool
+) -> str | None:
+    if not required:
+        return None
+    if submitted_sql is None:
+        return "DSH session has no successful sql_submit evidence"
+    if candidate_sql is None:
+        return "DSH final answer has no SQL candidate to bind to sql_submit"
+    if _normalise_bound_sql(candidate_sql) != _normalise_bound_sql(submitted_sql):
+        return "DSH final SQL does not match the successful sql_submit query"
+    return None
+
+
+def _normalise_bound_sql(value: str) -> str:
+    normalized = value.strip().replace("\r\n", "\n").replace("\r", "\n")
+    if normalized.endswith(";"):
+        normalized = normalized[:-1].rstrip()
+    return normalized
 
 
 def _as_text(value: str | bytes | None) -> str:

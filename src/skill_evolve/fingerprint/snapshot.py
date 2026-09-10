@@ -10,6 +10,7 @@ from typing import Any
 
 from skill_evolve.candidate.contracts import ResolvedCandidate
 from skill_evolve.config.loader import ResolvedManifest
+from skill_evolve.runner.dsh import sql_harness_policy_identity
 
 
 @dataclass(frozen=True)
@@ -80,13 +81,24 @@ def _collect_artifacts(resolved: ResolvedManifest) -> tuple[FileDigest, ...]:
         for case_id, paths in resolved.case_context_files
         for index, path in enumerate(paths)
     )
-    return tuple(
+    artifacts = tuple(
         FileDigest(
             name=name,
             path=path.relative_to(resolved.workspace).as_posix(),
             sha256=_sha256_file(path),
         )
         for name, path in declared
+    )
+    if resolved.manifest.environment.dsh.runner != "dsh":
+        return artifacts
+    identity = sql_harness_policy_identity()
+    return (
+        *artifacts,
+        FileDigest(
+            name="dsh.sql_harness_policy",
+            path="package://skill_evolve/runner/dsh_plugins/sql_harness_policy.mjs",
+            sha256=identity["plugin_sha256"],
+        ),
     )
 
 

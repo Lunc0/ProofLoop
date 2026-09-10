@@ -10,6 +10,7 @@ from skill_evolve.config import ManifestError, load_manifest
 from skill_evolve.config.models import DshConfig, OptimizerConfig
 from skill_evolve.fingerprint import create_snapshot
 from skill_evolve.runner.contracts import RawArtifact
+from skill_evolve.runner.dsh import sql_harness_policy_identity
 from tests.conftest import write_experiment
 
 
@@ -38,6 +39,26 @@ def test_snapshot_changes_when_fixture_changes(tmp_path) -> None:
     after = create_snapshot(load_manifest(manifest_path))
 
     assert before.fingerprint != after.fingerprint
+
+
+def test_real_dsh_snapshot_binds_sql_harness_policy_resource(tmp_path) -> None:
+    manifest_path = write_experiment(tmp_path)
+    manifest = manifest_path.read_text(encoding="utf-8")
+    manifest = manifest.replace("    runner: fake\n", "    runner: dsh\n")
+    manifest = manifest.replace("    fake_output: fake-results/results.json\n", "")
+    manifest_path.write_text(manifest, encoding="utf-8")
+
+    snapshot = create_snapshot(load_manifest(manifest_path))
+
+    policy = next(
+        artifact
+        for artifact in snapshot.artifacts
+        if artifact.name == "dsh.sql_harness_policy"
+    )
+    assert policy.path == (
+        "package://skill_evolve/runner/dsh_plugins/sql_harness_policy.mjs"
+    )
+    assert policy.sha256 == sql_harness_policy_identity()["plugin_sha256"]
 
 
 def test_snapshot_binds_verified_local_candidate_identity_and_hash(tmp_path) -> None:

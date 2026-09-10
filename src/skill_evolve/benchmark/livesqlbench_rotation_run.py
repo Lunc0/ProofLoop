@@ -47,6 +47,7 @@ from skill_evolve.runner.contracts import (
     RunnerExecution,
     RunnerOutput,
 )
+from skill_evolve.runner.dsh import sql_harness_policy_identity
 from skill_evolve.sql.livesqlbench import LiveSQLBenchFixture, LiveSQLBenchFixtureError
 from skill_evolve.subject import RunSubject
 from skill_evolve.trajectory.agent_input import build_evolution_agent_input
@@ -683,6 +684,7 @@ def _environment_fingerprint(
         "dsh": dsh_config.model_dump(mode="json"),
         "model": model.model_dump(mode="json"),
         "evaluator": _EVALUATOR_VERSION,
+        "sql_harness_policy": sql_harness_policy_identity(),
         "subject": subject.public_binding(),
     }
     return _hash_json(payload)
@@ -699,6 +701,7 @@ def _comparison_key(
             "dsh": dsh_config.model_dump(mode="json"),
             "model": model.model_dump(mode="json"),
             "evaluator": _EVALUATOR_VERSION,
+            "sql_harness_policy": sql_harness_policy_identity(),
         }
     )
 

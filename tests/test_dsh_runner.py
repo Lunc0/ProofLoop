@@ -96,6 +96,9 @@ def test_dsh_runner_invokes_headless_profile_and_extracts_one_sql_block(
     monkeypatch, tmp_path
 ) -> None:
     captured: dict[str, Any] = {}
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
     profile_patch = tmp_path / "profile.patch.yml"
     profile_patch.write_text("{}\n", encoding="utf-8")
 
@@ -237,6 +240,40 @@ def test_dsh_runner_rejects_plaintext_provider_credential(monkeypatch, tmp_path)
         DshRunner(_config(), None, _model()).run(_run_input(tmp_path))
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "https://127.0.0.1:54321/query",
+        "http://user@127.0.0.1:54321/query",
+        "http://127.0.0.1:54321/other",
+        "http://example.com:54321/query",
+    ),
+)
+def test_dsh_runner_rejects_unsafe_query_endpoint_before_start(
+    monkeypatch, tmp_path, endpoint: str
+) -> None:
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("DSH must not start with an unsafe endpoint"),
+    )
+    run_input = replace(
+        _run_input(tmp_path),
+        agent_workspace_root=tmp_path / "agent-workspaces",
+        database_access=ReadOnlyDatabaseAccess(query_endpoint=endpoint),
+    )
+
+    execution = DshRunner(_config(), None, _model()).run(run_input)
+
+    case = execution.output.cases[0]
+    assert case.status == "runner_error"
+    assert case.agent_execution is not None
+    assert case.agent_execution.error == "could not prepare DSH task runtime: ValueError"
+    assert endpoint not in execution.stderr
+
+
 def test_dsh_runner_uses_isolated_task_workspace_with_only_declared_context(
     monkeypatch, tmp_path
 ) -> None:
@@ -249,6 +286,10 @@ def test_dsh_runner_uses_isolated_task_workspace_with_only_declared_context(
     def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["command"] = command
         captured["cwd"] = kwargs["cwd"]
+        patch_indices = [index for index, value in enumerate(command) if value == "--patch"]
+        policy_path = Path(command[patch_indices[-2] + 1])
+        captured["policy_path"] = policy_path
+        captured["policy"] = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
         return subprocess.CompletedProcess(
             command,
             0,
@@ -278,8 +319,36 @@ def test_dsh_runner_uses_isolated_task_workspace_with_only_declared_context(
         for path in workspace.rglob("*")
         if path.is_file()
     )
-    assert "127.0.0.1:54321" in (workspace / "sql-readonly.ps1").read_text(encoding="utf-8")
-    assert execution.output.cases[0].candidate_sql == "SELECT COUNT(*) FROM customers"
+    assert not (workspace / "sql-readonly.ps1").exists()
+    task_text = (workspace / "TASK.md").read_text(encoding="utf-8")
+    assert "`TASK.md`" in task_text
+    assert "`schema.sql`" in task_text
+    assert "`context/01-policy.md`" in task_text
+    policy_entry = captured["policy"][0]["insert"][0]
+    assert policy_entry["id"] == "skill-evolve-sql-harness-policy"
+    assert policy_entry["name"] == (
+        captured["policy_path"].parent / "sql_harness_policy.mjs"
+    ).as_uri()
+    assert policy_entry["config"] == {
+        "policyVersion": "dsh-sql-harness-policy-v1",
+        "queryEndpoint": "http://127.0.0.1:54321/query",
+        "resourcePaths": ["TASK.md", "schema.sql", "context/01-policy.md"],
+        "allowedTools": ["read", "grep", "sql_probe", "sql_submit"],
+    }
+    assert (captured["policy_path"].parent / "sql_harness_policy.mjs").is_file()
+    artifacts = {
+        artifact.relative_path: artifact.content.decode("utf-8")
+        for artifact in execution.raw_artifacts
+    }
+    assert "dsh/customer-count.sql-harness-policy.patch.yml" in artifacts
+    policy_metadata = json.loads(artifacts["dsh/customer-count.sql-harness-policy.json"])
+    assert policy_metadata["policy_version"] == "dsh-sql-harness-policy-v1"
+    assert execution.output.cases[0].status == "runner_error"
+    assert execution.output.cases[0].agent_execution is not None
+    assert (
+        execution.output.cases[0].agent_execution.error
+        == "native SQL run requires authoritative DSH session evidence"
+    )
 
 
 def test_dsh_runner_injects_only_verified_skill_and_requires_it_to_be_read(
@@ -347,6 +416,7 @@ def test_dsh_runner_uses_session_log_as_authoritative_evidence(monkeypatch, tmp_
     evidence = SessionEvidence(
         session_id="session-123",
         final_message="```sql\nSELECT COUNT(*) FROM customers\n```",
+        submitted_sql=None,
         trajectory=(
             TrajectoryEvent(
                 timestamp="2026-08-25T00:00:00Z", type="dsh_session_start", payload={}
@@ -380,6 +450,68 @@ def test_dsh_runner_uses_session_log_as_authoritative_evidence(monkeypatch, tmp_
     assert case.usage.input_tokens == 12
     artifacts = {artifact.relative_path: artifact.content for artifact in execution.raw_artifacts}
     assert artifacts["dsh/customer-count.session.jsonl"] == loaded_log.redacted_jsonl
+
+
+@pytest.mark.parametrize(
+    ("submitted_sql", "final_sql", "expected_status"),
+    (
+        ("SELECT COUNT(*) FROM customers", "SELECT COUNT(*) FROM customers;", "completed"),
+        (None, "SELECT COUNT(*) FROM customers", "runner_error"),
+        ("SELECT 1", "SELECT COUNT(*) FROM customers", "runner_error"),
+    ),
+)
+def test_dsh_runner_binds_final_sql_to_successful_native_submit(
+    monkeypatch, tmp_path, submitted_sql: str | None, final_sql: str, expected_status: str
+) -> None:
+    session_root = tmp_path / "sessions"
+    session_root.mkdir()
+    session_path = session_root / "session.jsonl.zstd"
+    session_path.write_bytes(b"compressed-log")
+    config = _config().model_copy(
+        update={"session_log_root": str(session_root), "runner_args": ()}
+    )
+    loaded_log = LoadedDshSessionLog(events=(), redacted_jsonl=b'{"type":"session"}\n')
+    final_message = f"```sql\n{final_sql}\n```"
+    evidence = SessionEvidence(
+        session_id="session-123",
+        final_message=final_message,
+        submitted_sql=submitted_sql,
+        trajectory=(),
+        usage=Usage(),
+        unknown_event_types=(),
+    )
+
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout="not authoritative", stderr=""
+        ),
+    )
+    monkeypatch.setattr("skill_evolve.runner.dsh.snapshot_session_logs", lambda root: {})
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh.find_changed_session_logs", lambda before, root: (session_path,)
+    )
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh._session_log_for_workspace",
+        lambda candidates, workspace: (session_path, loaded_log),
+    )
+    monkeypatch.setattr("skill_evolve.runner.dsh.normalise_session_log", lambda log: evidence)
+    run_input = replace(
+        _run_input(tmp_path),
+        agent_workspace_root=tmp_path / "agent-workspaces",
+        database_access=ReadOnlyDatabaseAccess(
+            query_endpoint="http://127.0.0.1:54321/query"
+        ),
+    )
+
+    execution = DshRunner(config, None, _model()).run(run_input)
+
+    case = execution.output.cases[0]
+    assert case.status == expected_status
+    if expected_status == "completed":
+        assert case.candidate_sql == final_sql.strip().removesuffix(";") + ";"
+    else:
+        assert case.candidate_sql is None
 
 
 def test_dsh_runner_treats_nonzero_exit_as_runner_evidence_failure_and_redacts(
