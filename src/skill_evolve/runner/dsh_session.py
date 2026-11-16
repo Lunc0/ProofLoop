@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -18,6 +19,11 @@ _ZSTD_MAGIC = bytes((0x28, 0xB5, 0x2F, 0xFD))
 _MAX_COMPRESSED_BYTES = 50 * 1024 * 1024
 _MAX_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 _OBSERVED_SESSION_VERSION = 0
+_DSH_SPILL_NOTICE_PATTERN = re.compile(
+    r"\(Omitted [1-9]\d* bytes\. Full formatted result stored at: "
+    r"(?:[A-Za-z]:[\\/][^\r\n]+|/[^\r\n]+)"
+    r"\. Use read with offset/limit, or grep this path to search within it\.\)"
+)
 _OBSERVED_EVENT_TYPES = frozenset(
     {
         "permission/preset",
@@ -287,12 +293,21 @@ def _tool_result_json(value: Any) -> dict[str, Any]:
         raise DshSessionLogError("sql_submit result content has an unsupported block")
     nested = block.get("content")
     text = _content_text(nested, "sql_submit result content")
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise DshSessionLogError("sql_submit result is not JSON") from error
+    parsed = _json_with_optional_dsh_spill_notice(text)
     if not isinstance(parsed, dict):
         raise DshSessionLogError("sql_submit result is not an object")
+    return parsed
+
+
+def _json_with_optional_dsh_spill_notice(text: str) -> Any:
+    stripped = text.strip()
+    try:
+        parsed, end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError as error:
+        raise DshSessionLogError("sql_submit result is not JSON") from error
+    suffix = stripped[end:].strip()
+    if suffix and _DSH_SPILL_NOTICE_PATTERN.fullmatch(suffix) is None:
+        raise DshSessionLogError("sql_submit result is not JSON")
     return parsed
 
 

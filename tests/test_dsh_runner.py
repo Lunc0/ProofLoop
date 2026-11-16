@@ -514,6 +514,113 @@ def test_dsh_runner_binds_final_sql_to_successful_native_submit(
         assert case.candidate_sql is None
 
 
+def test_dsh_runner_accepts_spilled_native_submit_evidence(monkeypatch, tmp_path) -> None:
+    session_root = tmp_path / "sessions"
+    session_root.mkdir()
+    session_path = session_root / "session.jsonl.zstd"
+    session_path.write_bytes(b"compressed-log")
+    config = _config().model_copy(
+        update={"session_log_root": str(session_root), "runner_args": ()}
+    )
+    final_sql = "SELECT COUNT(*) FROM customers"
+    submit_result = (
+        '{"ok":true,"intent":"submit","phase":"finalize",'
+        '"columns":[],"rows":[]}\n\n'
+        "(Omitted 45290 bytes. Full formatted result stored at: "
+        "C:\\Temp\\missing-dsh-spill\\sql_submit.txt. Use read with offset/limit, "
+        "or grep this path to search within it.)"
+    )
+    loaded_log = LoadedDshSessionLog(
+        events=(
+            {
+                "type": "session",
+                "version": 0,
+                "id": "session-123",
+                "createdAt": 1_700_000_000_000,
+                "cwd": str(tmp_path / "agent-workspaces" / "customer-count"),
+                "delegationDepth": 0,
+            },
+            {
+                "type": "tool/call",
+                "seq": 1,
+                "time": 1_700_000_000_100,
+                "data": {
+                    "turn": 1,
+                    "step": 1,
+                    "callId": "submit-1",
+                    "name": "sql_submit",
+                    "arguments": json.dumps({"query": final_sql}),
+                },
+            },
+            {
+                "type": "tool/result",
+                "seq": 2,
+                "time": 1_700_000_000_200,
+                "data": {
+                    "turn": 1,
+                    "step": 1,
+                    "message": {
+                        "role": "tool",
+                        "id": "submit-result-1",
+                        "content": [
+                            {
+                                "type": "tool-result",
+                                "toolCallId": "submit-1",
+                                "content": [{"type": "text", "text": submit_result}],
+                                "isError": False,
+                            }
+                        ],
+                    },
+                },
+            },
+            {
+                "type": "assistant/message",
+                "seq": 3,
+                "time": 1_700_000_000_300,
+                "data": {
+                    "turn": 1,
+                    "step": 2,
+                    "message": {
+                        "role": "assistant",
+                        "id": "message-1",
+                        "content": [{"type": "text", "text": f"```sql\n{final_sql}\n```"}],
+                    },
+                },
+            },
+            {
+                "type": "turn/end",
+                "seq": 4,
+                "time": 1_700_000_000_400,
+                "data": {"turn": 1, "reason": {"kind": "completed"}},
+            },
+        ),
+        redacted_jsonl=b'{"type":"session"}\n',
+    )
+
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr("skill_evolve.runner.dsh.snapshot_session_logs", lambda root: {})
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh.find_changed_session_logs", lambda before, root: (session_path,)
+    )
+    monkeypatch.setattr(
+        "skill_evolve.runner.dsh._session_log_for_workspace",
+        lambda candidates, workspace: (session_path, loaded_log),
+    )
+    run_input = replace(
+        _run_input(tmp_path),
+        agent_workspace_root=tmp_path / "agent-workspaces",
+        database_access=ReadOnlyDatabaseAccess(query_endpoint="http://127.0.0.1:54321/query"),
+    )
+
+    case = DshRunner(config, None, _model()).run(run_input).output.cases[0]
+
+    assert case.status == "completed"
+    assert case.candidate_sql == final_sql
+
+
 def test_dsh_runner_treats_nonzero_exit_as_runner_evidence_failure_and_redacts(
     monkeypatch, tmp_path
 ) -> None:

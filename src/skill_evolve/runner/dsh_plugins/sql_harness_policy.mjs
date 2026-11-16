@@ -228,10 +228,14 @@ function toolDefinition(endpoint, intent) {
         ? "Execute the final read-only PostgreSQL candidate. On success, emit that exact query as the final answer without more tool calls."
         : "Execute one read-only PostgreSQL query to inspect the disposable evaluation fixture.",
     parameters: {
-      query: {
-        type: "string",
-        required: true,
-        description: "One SELECT, WITH, or EXPLAIN statement.",
+      type: "object",
+      additionalProperties: false,
+      required: ["query"],
+      properties: {
+        query: {
+          type: "string",
+          description: "One SELECT, WITH, or EXPLAIN statement.",
+        },
       },
     },
     output: outputDefinition(),

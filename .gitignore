@@ -8,6 +8,9 @@ dist/
 runs/
 .local/skill-evolve/
 data/livesqlbench/
+examples/trajectory_compression_demo.py
+examples/trajectory_compression_demo.md
+tests/test_trajectory_compression_demo.py
 *.py[cod]
 .env
 .env.*

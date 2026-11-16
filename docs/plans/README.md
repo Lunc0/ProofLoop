@@ -39,3 +39,4 @@
 | 31 | v0.29 | 已完成 | [Benchmark Runner Error 计为错题](31-v0.29-runner-error-as-incorrect.md) | [规格](../specs/31-next-runner-error-as-incorrect.md) | [实现记录](../design/31-v0.29-runner-error-as-incorrect.md) |
 | 32 | v0.30 | 已完成 | [Held-out 单题诊断运行](32-v0.30-heldout-single-case-run.md) | [规格](../specs/32-v0.30-heldout-single-case-run.md) | [实现记录](../design/32-v0.30-heldout-single-case-run.md) |
 | 33 | v0.31 | 已完成 | [DSH 原生 SQL 工具与 SQL Harness Policy](33-v0.31-dsh-native-sql-harness-policy.md) | [规格](../specs/33-v0.31-dsh-native-sql-harness-policy.md) | [实现记录](../design/33-v0.31-dsh-native-sql-harness-policy.md) |
+| 34 | v0.32 | 已完成 | [DSH Submit Spill 安全解析与语义判分](34-v0.32-dsh-submit-spill-safe-evaluation.md) | [规格](../specs/34-v0.32-dsh-submit-spill-safe-evaluation.md) | [实现记录](../design/34-v0.32-dsh-submit-spill-safe-evaluation.md) |

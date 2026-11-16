@@ -69,8 +69,19 @@ test("registers native tools and restricts the first agent", () => {
 
   assert.deepEqual([...h.definitions.keys()], ["sql_probe", "sql_submit"]);
   assert.deepEqual(h.state.restriction, { allow: [...__test.ALLOWED_TOOLS] });
-  assert.deepEqual(Object.keys(h.definitions.get("sql_probe").parameters), ["query"]);
-  assert.deepEqual(Object.keys(h.definitions.get("sql_submit").parameters), ["query"]);
+  const expectedParameters = {
+    type: "object",
+    additionalProperties: false,
+    required: ["query"],
+    properties: {
+      query: {
+        type: "string",
+        description: "One SELECT, WITH, or EXPLAIN statement.",
+      },
+    },
+  };
+  assert.deepEqual(h.definitions.get("sql_probe").parameters, expectedParameters);
+  assert.deepEqual(h.definitions.get("sql_submit").parameters, expectedParameters);
   assert.match(
     h.state.guard({ agent: h.agent, name: "pwsh", arguments: {} }),
     /TOOL_NOT_ALLOWED/,

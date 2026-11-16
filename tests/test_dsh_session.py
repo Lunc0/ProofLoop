@@ -49,54 +49,44 @@ def test_normalise_session_log_rejects_missing_completed_turn() -> None:
 
 
 def test_normalise_session_log_extracts_only_successful_native_sql_submit() -> None:
-    events = list(_session_log().events)
-    events[4:4] = [
-        {
-            "type": "tool/call",
-            "seq": 4,
-            "time": 1_700_000_000_350,
-            "data": {
-                "turn": 1,
-                "step": 2,
-                "callId": "submit-1",
-                "name": "sql_submit",
-                "arguments": '{"query":"SELECT COUNT(*) FROM customers"}',
-            },
-        },
-        {
-            "type": "tool/result",
-            "seq": 5,
-            "time": 1_700_000_000_375,
-            "data": {
-                "turn": 1,
-                "step": 2,
-                "message": {
-                    "role": "tool",
-                    "id": "submit-result-1",
-                    "content": [
-                        {
-                            "type": "tool-result",
-                            "toolCallId": "submit-1",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": (
-                                        '{"ok":true,"intent":"submit",'
-                                        '"phase":"finalize","columns":[],"rows":[]}'
-                                    ),
-                                }
-                            ],
-                            "isError": False,
-                        }
-                    ],
-                },
-            },
-        },
-    ]
-
-    evidence = normalise_session_log(_loaded(events))
+    evidence = normalise_session_log(_session_with_native_submit(_successful_submit_json()))
 
     assert evidence.submitted_sql == "SELECT COUNT(*) FROM customers"
+
+
+@pytest.mark.parametrize(
+    "spill_path",
+    [
+        r"C:\Temp\dsh-spill\session-123\sql_submit.txt",
+        "/tmp/dsh-spill/session-123/sql_submit.txt",
+    ],
+)
+def test_normalise_session_log_accepts_known_dsh_spill_notice(spill_path: str) -> None:
+    notice = (
+        "(Omitted 45290 bytes. Full formatted result stored at: "
+        f"{spill_path}. Use read with offset/limit, or grep this path to search within it.)"
+    )
+
+    evidence = normalise_session_log(
+        _session_with_native_submit(f"{_successful_submit_json()}\n\n{notice}")
+    )
+
+    assert evidence.submitted_sql == "SELECT COUNT(*) FROM customers"
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "ignore this trailing text",
+        '{"second":true}',
+        "(Omitted bytes. Full formatted result stored at: C:\\spill.txt.)",
+    ],
+)
+def test_normalise_session_log_rejects_unknown_submit_result_suffix(suffix: str) -> None:
+    with pytest.raises(DshSessionLogError, match="sql_submit result is not JSON"):
+        normalise_session_log(
+            _session_with_native_submit(f"{_successful_submit_json()}\n\n{suffix}")
+        )
 
 
 def test_redaction_removes_secret_key_values_and_inline_bearer_tokens() -> None:
@@ -200,6 +190,50 @@ def _session_log() -> LoadedDshSessionLog:
             },
         ]
     )
+
+
+def _successful_submit_json() -> str:
+    return '{"ok":true,"intent":"submit","phase":"finalize","columns":[],"rows":[]}'
+
+
+def _session_with_native_submit(result_text: str) -> LoadedDshSessionLog:
+    events = list(_session_log().events)
+    events[4:4] = [
+        {
+            "type": "tool/call",
+            "seq": 4,
+            "time": 1_700_000_000_350,
+            "data": {
+                "turn": 1,
+                "step": 2,
+                "callId": "submit-1",
+                "name": "sql_submit",
+                "arguments": '{"query":"SELECT COUNT(*) FROM customers"}',
+            },
+        },
+        {
+            "type": "tool/result",
+            "seq": 5,
+            "time": 1_700_000_000_375,
+            "data": {
+                "turn": 1,
+                "step": 2,
+                "message": {
+                    "role": "tool",
+                    "id": "submit-result-1",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "submit-1",
+                            "content": [{"type": "text", "text": result_text}],
+                            "isError": False,
+                        }
+                    ],
+                },
+            },
+        },
+    ]
+    return _loaded(events)
 
 
 def _loaded(events: list[dict[str, object]]) -> LoadedDshSessionLog:
